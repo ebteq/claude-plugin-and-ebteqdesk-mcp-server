@@ -1,0 +1,33 @@
+{
+  "name": "warnidesk",
+  "owner": {
+    "name": "Warnidesk",
+    "url": "https://github.com/ebteq/claude-plugin"
+  },
+  "metadata": {
+    "description": "The Warnidesk agent plugin: skills for working a Warnidesk helpdesk through its MCP server."
+  },
+  "plugins": [
+    {
+      "name": "warnidesk",
+      "source": "./plugin",
+      "description": "Work a Warnidesk helpdesk from Claude Code: triage and reply to tickets, run the escalation queue, read and propose knowledge base articles, and pull the ticket and escalation reports.",
+      "category": "productivity",
+      "homepage": "https://github.com/ebteq/claude-plugin/tree/main/plugin",
+      "author": {
+        "name": "Warnidesk",
+        "url": "https://github.com/ebteq/claude-plugin"
+      },
+      "license": "MIT",
+      "keywords": [
+        "warnidesk",
+        "helpdesk",
+        "ticketing",
+        "support",
+        "knowledge-base",
+        "escalation",
+        "mcp"
+      ]
+    }
+  ]
+}
