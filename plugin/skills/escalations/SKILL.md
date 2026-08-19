@@ -1,6 +1,6 @@
 ---
 name: escalations
-description: Work the Warnidesk business-partner escalation queue — see every unresolved escalated ticket in the installation, read an escalated ticket and its internal notes, reply to the customer on one, escalate a ticket, take one back off the queue, move it between working states, and close it. Use whenever the user asks about escalations, the escalation queue, escalated or urgent tickets, escalating something, de-escalating, or why a reply to an escalated ticket was refused.
+description: Work the Warnidesk business-partner escalation queue — see every unresolved escalated ticket in the installation, read an escalated ticket and its internal notes, reply to the customer on one, escalate a ticket, take one back off the queue, move it between working states, and close it. Use whenever the user asks about escalations, the escalation queue, the status of an escalated ticket or what is happening on one, escalated or urgent tickets, escalating something, de-escalating, or why a reply to an escalated ticket was refused.
 ---
 
 # Warnidesk escalations
@@ -114,6 +114,47 @@ Read **`escalated`** (a boolean, always accurate) to know whether a ticket is
 escalated. Do **not** infer it from `escalated_at`, which is nullable and is
 only a timestamp. `escalated_minutes` tells you how long it has been on the
 queue.
+
+## 🔴 "What is the status?" means SHOW THE WHOLE THREAD
+
+`list_escalations` carries header fields only — **no message bodies** — so it
+can tell you a ticket is on the queue and never what is happening on it. It
+also cannot tell you what happened to a ticket that has *left* the queue.
+
+**Whenever the user asks an escalated ticket's status, its progress, or where
+it stands, call `get_ticket(ticket_id)` and show them the entire
+conversation** — header, the customer's opening message (`data.body`), then
+every entry oldest first, each **labelled by kind**: `comment` (public, the
+customer saw it), `note` (private, internal), `event` (history). Name any
+attachments and say you can open the images. Do not pass `thread_limit`; it
+truncates and flags it at the response's **top level**, beside `data`, where
+it is easy to miss.
+
+### On an escalated ticket the notes are not optional — they ARE the status
+
+⚠️ **Warnidesk silently downgrades an ordinary agent reply on an escalated
+ticket into a private note.** That is the same rule that makes
+`comment_on_ticket` demand `escalation:write` here. The consequence for a
+status report is severe: the `comment` entries are only what the customer was
+actually told, while the diagnosis, the internal disagreement and the real plan
+sit in `note` entries.
+
+**A status report built from the public comments of an escalated ticket is not
+a partial answer — it is the wrong answer.** Read both, include both, and keep
+the difference explicit.
+
+The person you are talking to is the desk, so notes belong in what you show
+them. 🔴 The rule that never bends is the other direction: **never quote,
+paraphrase or allude to a note in anything the customer will see.**
+
+### Attachments
+
+When the answer depends on what is in a screenshot, call
+`get_ticket_attachment(attachment_id)` and actually look at it. Ids come from
+`get_ticket`: `data.attachments[].id` for the opening message's files, or
+`data.conversation[].attachments[].id` for a reply's or a note's. It returns
+the image itself, downscaled — so say so rather than guessing if you cannot
+read fine detail. Video attachments answer 415 and are never returned.
 
 ## Reading an escalated ticket
 

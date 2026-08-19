@@ -1,6 +1,6 @@
 ---
 name: tickets
-description: Work Warnidesk support tickets — list or search the queue, open a ticket and read its full conversation, look at an attached screenshot, draft and send a reply to the customer, file an internal note, move a ticket between working states or reopen a resolved one, open a new ticket, and close one. Use whenever the user asks about their tickets, the ticket queue, a ticket number or reference, replying to a customer, putting a ticket on hold or waiting on the customer, reopening a ticket, or resolving/closing one.
+description: Work Warnidesk support tickets — list or search the queue, open a ticket and read its full conversation, look at an attached screenshot, draft and send a reply to the customer, file an internal note, move a ticket between working states or reopen a resolved one, open a new ticket, and close one. Use whenever the user asks about their tickets, the ticket queue, the status of a ticket or what is happening on one, a ticket number or reference, replying to a customer, putting a ticket on hold or waiting on the customer, reopening a ticket, or resolving/closing one.
 ---
 
 # Warnidesk tickets
@@ -134,6 +134,50 @@ Check `data.escalated` — the boolean, never the nullable `escalated_at` — be
 you reach for a reply tool. If you did not check, the refusal tells you: a 403
 naming `escalation:write` from `comment_on_ticket` means the ticket is
 escalated, because that is the only way that endpoint can ask for that scope.
+
+## 🔴 "What is the status?" means SHOW THE WHOLE THREAD
+
+A status question is never answered from a list. `list_tickets`,
+`list_tickets_by_category` and `list_escalations` carry header fields only —
+**no message bodies at all** — so a status lifted from a list gives the user a
+single word (`solved`, `open`) and nothing about what actually happened.
+
+**Whenever the user asks a ticket's status, its progress, what is happening on
+it, or where it stands, call `get_ticket(ticket_id)` and show them the entire
+conversation.** Not a summary of it, and not the public comments only.
+
+Present it in this shape:
+
+1. **The header** — status, priority, category, assignee, requester, and
+   `escalated` (the boolean, never `escalated_at`).
+2. **The customer's opening message** — `data.body`. It is NOT the first
+   `conversation` entry and it is on no page of `get_ticket_comments`. A status
+   report missing it describes replies to a problem never stated.
+3. **Every conversation entry, oldest first, each LABELLED BY KIND:**
+   - `comment` → **public** — the customer has seen this
+   - `note` → **private, internal** — the customer has never seen it
+   - `event` → history, e.g. `Status updated: solved`, `Escalated`
+4. **Any attachments**, named — and say that you can open the images.
+
+Do **not** pass `thread_limit` when reporting status. It keeps only the newest
+N entries and sets `conversation_truncated` at the **top level** of the
+response, beside `data` and not inside it — easy to miss, and the result is a
+confidently incomplete report.
+
+### Private notes ARE part of a status report — to STAFF
+
+The person you are talking to is the desk. Notes are staff-only with respect to
+the **customer**, not with respect to them, and on any ticket that needed real
+work the internal notes are where its actual state lives: the diagnosis, the
+caveat, the reason it stalled. **Leaving them out produces a status report that
+is wrong.**
+
+So include them — and label every one clearly as internal, so neither you nor
+the user can later mistake a note for something the customer was told.
+
+🔴 The rule that never bends is the other direction: **never quote, paraphrase
+or allude to a note in anything the customer will see.** See "Internal notes
+are staff-only" below.
 
 ## Reading a ticket
 
