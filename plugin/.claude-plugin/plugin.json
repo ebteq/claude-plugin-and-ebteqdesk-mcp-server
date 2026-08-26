@@ -1,16 +1,16 @@
 {
-  "name": "warnidesk",
-  "version": "1.2.0",
-  "description": "Skills for working a Warnidesk helpdesk through its MCP server: tickets, escalations, the knowledge base, and the reports.",
+  "name": "ebteqdesk",
+  "version": "2.0.0",
+  "description": "Skills for working an Ebteqdesk helpdesk through its MCP server: tickets, escalations, the knowledge base, and the reports.",
   "author": {
-    "name": "Warnidesk",
+    "name": "Ebteqdesk",
     "url": "https://github.com/ebteq/claude-plugin"
   },
   "homepage": "https://github.com/ebteq/claude-plugin/tree/main/plugin",
   "repository": "https://github.com/ebteq/claude-plugin.git",
   "license": "MIT",
   "keywords": [
-    "warnidesk",
+    "ebteqdesk",
     "helpdesk",
     "ticketing",
     "support",
