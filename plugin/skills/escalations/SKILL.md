@@ -1,11 +1,11 @@
 ---
 name: escalations
-description: Work the Warnidesk business-partner escalation queue — see every unresolved escalated ticket in the installation, read an escalated ticket and its internal notes, reply to the customer on one, escalate a ticket, take one back off the queue, move it between working states, and close it. Use whenever the user asks about escalations, the escalation queue, the status of an escalated ticket or what is happening on one, escalated or urgent tickets, escalating something, de-escalating, or why a reply to an escalated ticket was refused.
+description: Work the Ebteqdesk business-partner escalation queue — see every unresolved escalated ticket in the installation, read an escalated ticket and its internal notes, reply to the customer on one, escalate a ticket, take one back off the queue, move it between working states, and close it. Use whenever the user asks about escalations, the escalation queue, the status of an escalated ticket or what is happening on one, escalated or urgent tickets, escalating something, de-escalating, or why a reply to an escalated ticket was refused.
 ---
 
-# Warnidesk escalations
+# Ebteqdesk escalations
 
-Verified against `warnidesk-mcp` 1.6.0 (32 tools).
+Verified against `ebteqdesk-mcp` 1.6.0 (32 tools).
 
 The escalation queue is the shared, install-wide view of what has gone wrong.
 Acting on it notifies real people.
@@ -132,7 +132,7 @@ it is easy to miss.
 
 ### On an escalated ticket the notes are not optional — they ARE the status
 
-⚠️ **Warnidesk silently downgrades an ordinary agent reply on an escalated
+⚠️ **Ebteqdesk silently downgrades an ordinary agent reply on an escalated
 ticket into a private note.** That is the same rule that makes
 `comment_on_ticket` demand `escalation:write` here. The consequence for a
 status report is severe: the `comment` entries are only what the customer was

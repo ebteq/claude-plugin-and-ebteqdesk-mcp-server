@@ -1,11 +1,11 @@
 ---
 name: reports
-description: Pull Warnidesk reporting and analytics — the account-wide ticket report (volume, response times, resolution times, ratings) and the per-category escalation report, both over a date range. Use whenever the user asks for ticket metrics, support statistics, response or resolution times, ticket volume, escalation counts by category, a weekly or monthly summary, or how the desk is performing.
+description: Pull Ebteqdesk reporting and analytics — the account-wide ticket report (volume, response times, resolution times, ratings) and the per-category escalation report, both over a date range. Use whenever the user asks for ticket metrics, support statistics, response or resolution times, ticket volume, escalation counts by category, a weekly or monthly summary, or how the desk is performing.
 ---
 
-# Warnidesk reports
+# Ebteqdesk reports
 
-Verified against `warnidesk-mcp` 1.6.0 (32 tools).
+Verified against `ebteqdesk-mcp` 1.6.0 (32 tools).
 
 Two reports. They cover different things, need different permissions, and — the
 part that quietly ruins numbers — **interpret dates differently**.

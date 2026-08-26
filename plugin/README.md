@@ -1,15 +1,15 @@
-# Warnidesk agent plugin
+# Ebteqdesk agent plugin
 
-Four Claude Code skills for working a Warnidesk helpdesk through its MCP server:
+Four Claude Code skills for working an Ebteqdesk helpdesk through its MCP server:
 
 | Skill | Covers |
 |---|---|
-| `warnidesk:tickets` | List and read tickets, the full conversation, attachments, reply, internal notes, move a ticket between working states or reopen one, open a ticket, close one |
-| `warnidesk:escalations` | The shared escalation queue, reading and replying on escalated tickets, escalate, de-escalate, close |
-| `warnidesk:knowledge-base` | Search and read articles, the category/folder tree, propose and update articles, upload and embed screenshots, review verdicts, create/delete categories and folders, reorder |
-| `warnidesk:reports` | The account-wide ticket report and the per-category escalation report |
+| `ebteqdesk:tickets` | List and read tickets, the full conversation, attachments, reply, internal notes, move a ticket between working states or reopen one, open a ticket, close one |
+| `ebteqdesk:escalations` | The shared escalation queue, reading and replying on escalated tickets, escalate, de-escalate, close |
+| `ebteqdesk:knowledge-base` | Search and read articles, the category/folder tree, propose and update articles, upload and embed screenshots, review verdicts, create/delete categories and folders, reorder |
+| `ebteqdesk:reports` | The account-wide ticket report and the per-category escalation report |
 
-**Verified against `warnidesk-mcp` 1.6.0 (32 tools).** Every `SKILL.md` carries
+**Verified against `ebteqdesk-mcp` 1.6.0 (32 tools).** Every `SKILL.md` carries
 the same line. If the server you are connected to reports a different version in
 `serverInfo.version`, treat these skills as possibly stale.
 
@@ -18,24 +18,24 @@ the same line. If the server you are connected to reports a different version in
 🔴 **It does not install or configure the MCP server, and it deliberately ships
 no `.mcp.json`.**
 
-The Warnidesk MCP server is configured with a personal access token. Putting
+The Ebteqdesk MCP server is configured with a personal access token. Putting
 that token in a file that lives in a repository — or in any file a plugin
 installs — is how credentials leak. Registration therefore stays a command the
-user runs, which is what **Settings → API keys** on your Warnidesk hands you:
+user runs, which is what **Settings → API keys** on your Ebteqdesk hands you:
 
 ```bash
-claude mcp add warnidesk \
-  --env WARNIDESK_BASE_URL=https://your-warnidesk.example.com \
-  --env WARNIDESK_API_TOKEN='<your-api-key>' \
-  -- warnidesk-mcp
+claude mcp add ebteqdesk \
+  --env EBTEQDESK_BASE_URL=https://your-ebteqdesk.example.com \
+  --env EBTEQDESK_API_TOKEN='<your-api-key>' \
+  -- ebteqdesk-mcp
 ```
 
 The skills assume that server is already connected. If it is not, they say so
 rather than guessing.
 
-⚠️ **The `warnidesk-mcp` server itself is distributed from a private
+⚠️ **The `ebteqdesk-mcp` server itself is distributed from a private
 repository.** This plugin is public; the server is not. Installing the plugin
-gives you the skills, not the tools — the `warnidesk-mcp` executable the command
+gives you the skills, not the tools — the `ebteqdesk-mcp` executable the command
 above invokes has to be installed separately, from a repository you need access
 to. Without it every tool named in these skills is simply absent, and the skills
 will tell you the server is not connected.
@@ -44,8 +44,14 @@ will tell you the server is not connected.
 
 ```bash
 claude plugin marketplace add ebteq/claude-plugin
-claude plugin install warnidesk
+claude plugin install ebteqdesk
 ```
+
+⚠️ **Upgrading from 1.x?** The plugin, the marketplace, the MCP server key, the
+env vars and the console script all changed name in 2.0.0, and the env vars and
+the console script changed with **no fallback**. The repository root README has
+the full table and the commands; running the install above without doing the
+rest leaves you with skills whose tools are absent.
 
 ## Scopes
 
@@ -82,23 +88,23 @@ Test a change without pushing it, by adding the repo as a local marketplace:
 
 ```bash
 claude plugin marketplace add /path/to/your/claude-plugin/checkout
-claude plugin install warnidesk@warnidesk
-claude plugin details warnidesk          # component inventory + token cost
+claude plugin install ebteqdesk@ebteqdesk
+claude plugin details ebteqdesk          # component inventory + token cost
 # ...
-claude plugin marketplace remove warnidesk
+claude plugin marketplace remove ebteqdesk
 ```
 
 ## Keeping these skills true
 
 Every factual claim in a `SKILL.md` — which scope a tool needs, what a default
 does, which call emails a customer — comes from the MCP server's own tool
-descriptions in `clients/python/src/warnidesk_mcp/server.py`.
+descriptions in `clients/python/src/ebteqdesk_mcp/server.py`.
 
 ⚠️ **That file lives in a separate, private repository.** It is the source of
 truth, and it is not in this one, so the same-pull-request rule that used to keep
 the two in step cannot hold across a repository boundary.
 
-What replaces it is the **"Verified against `warnidesk-mcp` 1.6.0 (32 tools)"**
+What replaces it is the **"Verified against `ebteqdesk-mcp` 1.6.0 (32 tools)"**
 line at the top of this README and of every `SKILL.md`. When the server ships a
 new version, re-read its tool descriptions, correct whatever moved, and bump that
 line in all five files together. A skill whose line names an older version than

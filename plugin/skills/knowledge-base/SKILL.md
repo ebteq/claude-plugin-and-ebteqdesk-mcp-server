@@ -1,11 +1,11 @@
 ---
 name: knowledge-base
-description: Read and write the Warnidesk knowledge base — search published help articles, read one in full, walk the category and folder tree, propose a new article or edit an existing one for human review, check a review verdict, upload a screenshot and embed it in an article, create categories and folders, delete an empty one, and reorder them. Use whenever the user asks about the knowledge base, help articles, documentation for customers, the KB tree, writing or updating an article, adding a screenshot to an article, or where an article should live.
+description: Read and write the Ebteqdesk knowledge base — search published help articles, read one in full, walk the category and folder tree, propose a new article or edit an existing one for human review, check a review verdict, upload a screenshot and embed it in an article, create categories and folders, delete an empty one, and reorder them. Use whenever the user asks about the knowledge base, help articles, documentation for customers, the KB tree, writing or updating an article, adding a screenshot to an article, or where an article should live.
 ---
 
-# Warnidesk knowledge base
+# Ebteqdesk knowledge base
 
-Verified against `warnidesk-mcp` 1.6.0 (32 tools).
+Verified against `ebteqdesk-mcp` 1.6.0 (32 tools).
 
 Two halves that behave very differently: reading is a plain query, and
 **writing can never publish**.
@@ -56,7 +56,7 @@ opposite answers. Call `whoami` and compare:
 ⚠️ **These two return only published, public articles — even for an
 administrator.** This is the same corpus an anonymous visitor to the help portal
 sees. Internal runbooks and `agents`-only articles that are plainly visible in
-the Warnidesk web UI are **not** reachable through them.
+the Ebteqdesk web UI are **not** reachable through them.
 
 ⚠️ **`list_kb_tree` is the exception, and it is not filtered.** It returns
 **ids** and **every folder whatever its visibility**, internal ones included —
@@ -73,7 +73,7 @@ existed. So you cannot tell "there is no such article" from "there is one and
 you may not read it" — and you must not tell the user you can. Say the article
 is not in the published knowledge base, and leave it there.
 
-`body_html` is **sanitised HTML, not markdown.** Warnidesk has no markdown form
+`body_html` is **sanitised HTML, not markdown.** Ebteqdesk has no markdown form
 of an article. Render or convert it; never hand it to a user as markdown source.
 
 ## Structure, and where a folder id comes from
@@ -199,7 +199,7 @@ An article with a screenshot takes **two calls, in this order**:
 2. Put **the returned `url`, exactly as it came back**, into the body as
    `<img src="/kb/media/01J…" alt="what the picture shows">`
 3. **Save the article** — `propose_kb_article` or `update_kb_article`. The save
-   is what links the file to the article: Warnidesk derives the media↔article
+   is what links the file to the article: Ebteqdesk derives the media↔article
    link **from the saved body**, not from the upload.
 
 🔴 **NEVER invent or guess a `/kb/media/` URL.** A ULID is 26 random characters.
@@ -234,7 +234,7 @@ get it past the server. Do not suggest that it will.
 **1. Every folder created through this API is `visibility: agents` — INTERNAL —
 and no argument changes it.** Not on `create_kb_folder` and not on
 `update_kb_folder`. Nothing filed into such a folder reaches a customer until a
-**human** changes the visibility in the Warnidesk web UI.
+**human** changes the visibility in the Ebteqdesk web UI.
 
 **So never tell a user their article will be visible to customers.** Check
 `visibility` in `list_kb_tree` if you need to know where a folder actually
@@ -275,7 +275,7 @@ before you rename, and read the `slug` back out of the response. Omit `name`
 entirely to leave the URL alone.
 
 `update_kb_folder` **cannot move a folder and cannot change its visibility.**
-Both are access-control decisions that stay with a human in the Warnidesk UI.
+Both are access-control decisions that stay with a human in the Ebteqdesk UI.
 
 ### 🔴 The deletes are a REFUSAL, never a cascade
 
@@ -290,7 +290,7 @@ no restore, no version history — the response is the only record of what it wa
 
 🔴 **That refusal is a safety property, not an obstacle to route around. There is
 NO delete-article tool anywhere on this API** — so a folder that has been filed
-into can only be emptied by a person in the Warnidesk web UI.
+into can only be emptied by a person in the Ebteqdesk web UI.
 
 **Never delete folders to "clear the way" for a category delete, and never ask a
 human to empty a folder so a delete goes through, unless the user asked for

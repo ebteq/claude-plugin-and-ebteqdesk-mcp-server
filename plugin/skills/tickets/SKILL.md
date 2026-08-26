@@ -1,17 +1,28 @@
 ---
 name: tickets
-description: Work Warnidesk support tickets — list or search the queue, open a ticket and read its full conversation, look at an attached screenshot, draft and send a reply to the customer, file an internal note, move a ticket between working states or reopen a resolved one, open a new ticket, and close one. Use whenever the user asks about their tickets, the ticket queue, the status of a ticket or what is happening on one, a ticket number or reference, replying to a customer, putting a ticket on hold or waiting on the customer, reopening a ticket, or resolving/closing one.
+description: Work Ebteqdesk support tickets — list or search the queue, open a ticket and read its full conversation, look at an attached screenshot, draft and send a reply to the customer, file an internal note, move a ticket between working states or reopen a resolved one, open a new ticket, and close one. Use whenever the user asks about their tickets, the ticket queue, the status of a ticket or what is happening on one, a ticket number or reference, replying to a customer, putting a ticket on hold or waiting on the customer, reopening a ticket, or resolving/closing one.
 ---
 
-# Warnidesk tickets
+# Ebteqdesk tickets
 
-Verified against `warnidesk-mcp` 1.6.0 (32 tools).
+Verified against `ebteqdesk-mcp` 1.6.0 (32 tools).
 
 You are working a **live helpdesk**. Real customers receive what you send.
 
-Every tool here comes from the `warnidesk` MCP server. If those tools are not
+Every tool here comes from the `ebteqdesk` MCP server. If those tools are not
 available, the server is not connected — say so rather than guessing; the user
-connects it from **Settings → API keys** on their Warnidesk.
+connects it from **Settings → API keys** on their Ebteqdesk.
+
+⚠️ **The server key was `warnidesk` before plugin 2.0.0, and an install that
+predates the rename still has it.** The key is chosen by whoever registered the
+server, lives in the host's own config, and is what prefixes the tool names —
+`mcp__ebteqdesk__list_tickets` today, `mcp__warnidesk__list_tickets` on a
+pre-2.0 install. The tools themselves, their arguments and their behaviour are
+identical under either prefix, so if you find the tool set registered under
+`warnidesk`, **use it and carry on** — that is a stale registration, not a
+missing server. Mention the rename once so the user can re-register at their
+convenience; do not refuse to work and do not ask them to fix it first. The
+`warnidesk` key is accepted for this release only and goes away in the next.
 
 ## Before you touch anything
 
