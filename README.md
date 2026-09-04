@@ -4,7 +4,7 @@ Claude Code skills for working a [Ebteqdesk](https://github.com/ebteq) helpdesk 
 its MCP server: tickets, the escalation queue, the knowledge base, and the reports.
 
 ```bash
-claude plugin marketplace add ebteq/claude-plugin
+claude plugin marketplace add ebteq/claude-plugin-and-ebteqdesk-mcp-server
 claude plugin install ebteqdesk
 ```
 
@@ -42,13 +42,14 @@ still worth re-registering, because the compatibility goes away in the next rele
 # 1. plugin: remove the old name, add the new one
 claude plugin uninstall warnidesk
 claude plugin marketplace remove warnidesk
-claude plugin marketplace add ebteq/claude-plugin
+claude plugin marketplace add ebteq/claude-plugin-and-ebteqdesk-mcp-server
 claude plugin install ebteqdesk
 
-# 2. server: the console script is a different distribution, so uninstall first —
-#    `uv tool install` refuses to overwrite a script owned by another package
+# 2. server: uninstall the old package first — 3.0.0 ships no `warnidesk-mcp`
+#    script, but the old package's one stays on PATH until it is removed, and a
+#    config still pointing at that name keeps silently launching 1.6.0
 uv tool uninstall warnidesk-mcp
-uv tool install "git+https://github.com/ebteq/ticketing@master#subdirectory=clients/python"
+uv tool install "git+https://github.com/ebteq/claude-plugin-and-ebteqdesk-mcp-server@main#subdirectory=mcp-server"
 
 # 3. registration: new key, new env var names, new command
 claude mcp remove warnidesk
@@ -67,10 +68,19 @@ pins the client to the git ref that matches the API that desk actually answers.
 The skills describe tools that come from the `ebteqdesk-mcp` server. Without it, an agent
 loads the skills and finds none of the tools it is told to call.
 
-⚠️ **The server ships from a private repository** and needs access to install. If you are
-not on the Ebteqdesk team, this plugin is readable but not runnable. Your Ebteqdesk
-install's **Settings → API keys** page carries the current install and registration
-commands, along with the scopes a key needs.
+**The server is in this repository**, under [`mcp-server/`](mcp-server/). It is a Python
+package and is installed separately from the plugin — installing the plugin gives you the
+skills, not the tools:
+
+```bash
+uv tool install "git+https://github.com/ebteq/claude-plugin-and-ebteqdesk-mcp-server@main#subdirectory=mcp-server"
+```
+
+⚠️ **This repository is private**, so that install needs `git` and a GitHub account with
+access to it. If you are not on the Ebteqdesk team, this plugin is readable but not
+runnable. Your Ebteqdesk install's **Settings → API keys** page carries the current install
+and registration commands, along with the scopes a key needs; the long version is in
+[`mcp-server/README.md`](mcp-server/README.md).
 
 ## What is in here
 
@@ -78,6 +88,7 @@ commands, along with the scopes a key needs.
 |---|---|
 | `.claude-plugin/marketplace.json` | the marketplace manifest — this repo publishes one plugin |
 | `plugin/` | the plugin itself: manifest, README, and the four skills |
+| `mcp-server/` | the `ebteqdesk-mcp` MCP server those skills call — a Python package installed with `pip`, `pipx` or `uv tool` |
 
 | Skill | Covers |
 |---|---|
@@ -89,14 +100,39 @@ commands, along with the scopes a key needs.
 ## Accuracy
 
 Every factual claim in a skill — which scope a tool needs, what a default does, which call
-emails a customer — is checked against the MCP server's own tool definitions.
+emails a customer — is checked against the MCP server's own tool definitions, in
+[`mcp-server/src/ebteqdesk_mcp/server.py`](mcp-server/src/ebteqdesk_mcp/server.py).
 
 **Verified against `ebteqdesk-mcp` 1.6.0 (32 tools).**
 
-The server lives in a different, private repository, so a change there and the skill
-describing it can no longer land in one pull request. That version line is the mitigation:
-if it does not match the `serverInfo.version` your host reports at connect time, treat
-these skills as possibly stale and trust the tool descriptions over them.
+That file is now **in this repository**, so a change to a tool description and the skill
+change that follows from it land in **one pull request** again. That rule — not a version
+string — is what keeps the two in step, and it was simply unavailable for as long as the
+server was a separate repository. Ship them together; a PR that edits `server.py` and no
+`SKILL.md` should be asked why.
+
+The version line is not a stamp of what is in `mcp-server/`; it names the build a human
+last read the tool descriptions against. If it does not match the `serverInfo.version`
+your host reports at connect time, treat these skills as possibly stale and trust the
+tool descriptions over them.
+
+⚠️ **Right now it does not match, and this is exactly where the gap is.** The server in
+this repository is **4.2.0, with 42 tools**. The skills have **not** been re-verified
+against it — that is outstanding work in its own right, not something the repository merge
+did or could do. The known gaps:
+
+| Landed in | What the skills get wrong or miss |
+|---|---|
+| 2.1.0 | `list_kb_proposals` — a read tool, not mentioned in `knowledge-base` |
+| 4.0.0 | 🔴 **A live wrong claim, not just a hole.** `update_kb_article` on a **published** article stopped failing with `409` and now succeeds with `202`, staging a pending revision and handing back the **live, unchanged** article. `knowledge-base/SKILL.md` still says "A published article is refused with 409, not edited and not unpublished" |
+| 4.1.0 | `propose_kb_article` and `update_kb_article` gained eight optional `en_*` / `zhcn_*` arguments so one call carries both languages. The skill's bilingual guidance predates them, and on a **published** article the old one-call-per-locale approach now *replaces* rather than accumulates — the second call drops the first language |
+| 4.2.0 | the nine agent-provisioning tools — `list_agents`, `get_agent`, `list_roles`, `list_groups`, `list_api_keys`, `create_agent`, `update_agent`, `issue_api_key`, `revoke_api_key`. No skill mentions any of them; four write, two return a secret exactly once, and none can be undone through the API |
+
+What the skills *do* describe was checked against 1.6.0, and no tool that existed then has
+been renamed or removed, or changed the meaning of an argument a 1.6.0-era caller would
+pass. So the rest is still usable: the gap is the rows above, not silent drift everywhere.
+Treat anything touching the knowledge base write path with particular care until the
+re-verification pass happens.
 
 ## Licence
 

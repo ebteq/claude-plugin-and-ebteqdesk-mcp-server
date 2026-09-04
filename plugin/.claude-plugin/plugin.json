@@ -4,10 +4,10 @@
   "description": "Skills for working an Ebteqdesk helpdesk through its MCP server: tickets, escalations, the knowledge base, and the reports.",
   "author": {
     "name": "Ebteqdesk",
-    "url": "https://github.com/ebteq/claude-plugin"
+    "url": "https://github.com/ebteq/claude-plugin-and-ebteqdesk-mcp-server"
   },
-  "homepage": "https://github.com/ebteq/claude-plugin/tree/main/plugin",
-  "repository": "https://github.com/ebteq/claude-plugin.git",
+  "homepage": "https://github.com/ebteq/claude-plugin-and-ebteqdesk-mcp-server/tree/main/plugin",
+  "repository": "https://github.com/ebteq/claude-plugin-and-ebteqdesk-mcp-server.git",
   "license": "MIT",
   "keywords": [
     "ebteqdesk",

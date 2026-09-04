@@ -2,7 +2,7 @@
   "name": "ebteqdesk",
   "owner": {
     "name": "Ebteqdesk",
-    "url": "https://github.com/ebteq/claude-plugin"
+    "url": "https://github.com/ebteq/claude-plugin-and-ebteqdesk-mcp-server"
   },
   "metadata": {
     "description": "The Ebteqdesk agent plugin: skills for working an Ebteqdesk helpdesk through its MCP server."
@@ -13,10 +13,10 @@
       "source": "./plugin",
       "description": "Work an Ebteqdesk helpdesk from Claude Code: triage and reply to tickets, run the escalation queue, read and propose knowledge base articles, and pull the ticket and escalation reports.",
       "category": "productivity",
-      "homepage": "https://github.com/ebteq/claude-plugin/tree/main/plugin",
+      "homepage": "https://github.com/ebteq/claude-plugin-and-ebteqdesk-mcp-server/tree/main/plugin",
       "author": {
         "name": "Ebteqdesk",
-        "url": "https://github.com/ebteq/claude-plugin"
+        "url": "https://github.com/ebteq/claude-plugin-and-ebteqdesk-mcp-server"
       },
       "license": "MIT",
       "keywords": [
