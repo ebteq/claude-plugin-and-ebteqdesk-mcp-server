@@ -1,0 +1,167 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ebteqdesk-mcp"
+# Single-sourced from src/ebteqdesk_mcp/_version.py — see [tool.hatch.version]
+# at the bottom and the module's own docstring. Four places quote this string
+# (the manifest, `__version__`, `serverInfo.version` on the wire, and the
+# User-Agent) and exactly one of them owns it.
+dynamic = ["version"]
+description = "MCP server exposing the Ebteqdesk REST API (tickets, escalation report, knowledge base) over stdio."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "Ebteqdesk" }]
+keywords = ["mcp", "ebteqdesk", "ticketing", "claude"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+]
+
+# ─────────────────────────────────────────────────────────── DEPENDENCIES ──
+#
+# EVERY RUNTIME IMPORT IS DECLARED HERE, INCLUDING THE ONES THE SDK WOULD HAVE
+# BROUGHT ANYWAY. `mcp` pulls in both `httpx2` and `pydantic` transitively, so
+# on any working install these two lines change nothing — and that is precisely
+# why they are easy to omit and wrong to. A package that imports a name it does
+# not declare is a package whose install silently breaks the day its dependency
+# drops one of its own.
+#
+#   mcp      the official Model Context Protocol Python SDK. 2.0 is the release
+#            that renamed the high-level helper FastMCP -> MCPServer, so the
+#            floor is >=2.0.
+#
+#            🔴 THE CEILING IS <2.1, NOT <3, AND THAT IS A KNOWN-BROKEN PIN
+#            RATHER THAN CAUTION. 2.1.x WRAPS TOOL EXCEPTIONS: a ToolError
+#            raised inside a tool reaches the caller as
+#            `UnexpectedToolError("Error executing tool <name>")` with the
+#            original message discarded. This package's entire error contract is
+#            that message — a scope refusal naming the missing scope, an ability
+#            refusal naming the ability, an argument guard naming the argument
+#            and where its id comes from. Under 2.1.1 all of that becomes one
+#            opaque sentence, and 45 tests fail saying so.
+#
+#            ⚠️ SO THE CAP IS A BUG REPORT, NOT A PREFERENCE. Lifting it means
+#            adapting this package to whatever 2.1 wants for a
+#            caller-visible error — probably raising the SDK's own error type
+#            rather than ToolError — and re-running the suite; it is not a
+#            one-line version bump. Do not raise it because a resolver complains.
+#
+#   httpx2   the HTTP client, imported directly by client.py. Note this is
+#            `httpx2`, the 2.x line, NOT the `httpx` 0.x distribution —
+#            separate names on PyPI, and pinning the wrong one gets you two HTTP
+#            stacks in one environment.
+#
+#   pydantic imported directly by server.py, for `WithJsonSchema`: the tool
+#            argument schemas are hand-written where the function signature
+#            cannot express them (`requester`'s two shapes, the `priority` and
+#            `status` enums), and that annotation is how a hand-written schema
+#            is attached. The SDK is built on pydantic v2 and cannot be used
+#            without it, so the floor is the v2 line.
+#
+# 🔴 RANGES, NOT EXACT PINS, AND THAT IS A DECISION. An application pins
+# exactly; a library that people `pipx install` alongside other tools must not,
+# because an exact pin turns any co-installed package into a resolver conflict.
+# The floor is the oldest version this code can actually use and the ceiling is
+# the next major, which is where an SDK is allowed to rename things out from
+# under it. What "tested against" means is recorded below rather than frozen
+# into the ranges.
+#
+# VERIFIED AGAINST, on the end-to-end run of all twelve tools against staging:
+#
+# ⚠️ The version below is 1.0.0 and that is not stale bookkeeping. This block
+# records what was ACTUALLY on the machine during that run, not what is current;
+# the package was still named `warnidesk-mcp` then, and only the name is updated
+# here so the line names the distribution that exists today. Re-run the check
+# before changing any number in it.
+#
+#     ebteqdesk-mcp   1.0.0
+#     mcp             2.0.0
+#     httpx2          2.10.0
+#     pydantic        2.13.4
+#     Python          3.13.13   (floor is 3.10, the SDK's own)
+#
+# Reproduce that exact set with `pip install -r requirements-lock.txt` if one is
+# ever added; there is deliberately no lockfile today, because this package is
+# consumed as a git dependency by end users and not deployed as a service.
+dependencies = [
+    "mcp>=2.0,<2.1",
+    "httpx2>=2.5,<3",
+    "pydantic>=2.7,<3",
+]
+
+# The test suite, and nothing else. No linter and no formatter are declared:
+# choosing them is a repo-wide decision, not this package's to make on its own.
+#
+#   pytest          >=8 for the assertion rewriting these tests rely on; <10
+#                   because pytest removes deprecated hooks on the major.
+#   pytest-asyncio  >=0.23 is where `asyncio_mode` settled into its current
+#                   form (see [tool.pytest.ini_options] below, which sets it to
+#                   "auto" — every test in this suite is a coroutine). <2 for
+#                   the same reason as above; 1.x is what is tested.
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<10",
+    "pytest-asyncio>=0.23,<2",
+]
+
+# 🔴 `main` — this repository's default branch — and not a feature branch. These
+# are what a user lands on from PyPI-style metadata or an editor's package pane,
+# and pointing them at a branch that moves ahead of what they installed would
+# show them documentation for code they do not have.
+#
+# The `Source` URL points into `mcp-server/`, not at the repository root: the
+# root of this repo is the Claude Code plugin marketplace, and the plugin whose
+# skills call this server lives alongside at `plugin/`.
+[project.urls]
+Homepage = "https://github.com/ebteq/claude-plugin-and-ebteqdesk-mcp-server"
+Source = "https://github.com/ebteq/claude-plugin-and-ebteqdesk-mcp-server/tree/main/mcp-server"
+Issues = "https://github.com/ebteq/claude-plugin-and-ebteqdesk-mcp-server/issues"
+
+# The console entry point Claude Code launches as a subprocess. `ebteqdesk-mcp`
+# with no arguments speaks MCP over stdio and nothing else — see __main__.py for
+# why it must never print to stdout.
+#
+# 🔴 ONE NAME. The `warnidesk-mcp` alias that sat here through 1.x is GONE, and
+# it must not come back — `tests/test_entrypoint.py` fails if it does.
+#
+# What that costs, stated plainly so nobody re-adds it out of sympathy: an
+# existing `~/.claude.json` with `"command": "warnidesk-mcp"` in it now fails
+# with `command not found`, which a host reports as a server that crashed at
+# startup rather than as a rename. That failure is the point — the alternative
+# was an install that keeps silently working under a name the rest of the
+# project no longer uses.
+#
+# ⚠️ The alias never made the upgrade free anyway: `uv tool install` refuses to
+# overwrite a console script owned by another distribution, so `uv tool
+# uninstall warnidesk-mcp` was always required first. See the README's upgrade
+# section, which now covers the config file as well as the installer.
+[project.scripts]
+ebteqdesk-mcp = "ebteqdesk_mcp.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ebteqdesk_mcp"]
+
+# Where `dynamic = ["version"]` above reads from. Hatchling parses the
+# `__version__ = "..."` assignment out of that module, so the manifest and the
+# running code cannot report different versions.
+[tool.hatch.version]
+path = "src/ebteqdesk_mcp/_version.py"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+# The integration suite talks to a real Ebteqdesk. It deselects itself when the
+# environment is not configured, so a bare `pytest` runs the unit suite only.
+markers = [
+    "integration: requires a live Ebteqdesk (EBTEQDESK_BASE_URL + EBTEQDESK_API_TOKEN)",
+]
