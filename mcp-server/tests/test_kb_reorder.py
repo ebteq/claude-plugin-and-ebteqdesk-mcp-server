@@ -91,6 +91,24 @@ STALE_ORDER = always_json(
     },
 )
 
+#: The server's 422 when `ids` spans BOTH knowledge base portals — verbatim,
+#: added alongside two-knowledge-base support. This is the whole-set rule's
+#: SECOND way to fail: a list can be exactly the current sibling set (same
+#: members, same count, no duplicates) and still be refused, if that set
+#: happens to span Salon V3 and Warni.
+MIXED_PORTAL_ORDER = always_json(
+    422,
+    {
+        "error": "The request body is not valid.",
+        "errors": {
+            "ids": [
+                "The order must list categories from a single knowledge base "
+                "portal. Reorder each portal in its own request."
+            ]
+        },
+    },
+)
+
 CATEGORIES_OK = always_json(200, {"data": [kb_category_row(id=3), kb_category_row(id=5)]})
 FOLDERS_OK = always_json(200, {"data": [kb_folder_row(id=7), kb_folder_row(id=9)]})
 ARTICLES_OK = always_json(
@@ -268,6 +286,24 @@ async def test_a_stale_set_surfaces_as_the_servers_422(make_client) -> None:
     assert "out of date" in str(raised.value)
 
 
+async def test_a_mixed_portal_set_surfaces_as_the_servers_422(make_client) -> None:
+    """🔴 BREAKING SINCE TWO-KNOWLEDGE-BASE SUPPORT. Before Salon V3 and Warni
+    existed, "the complete sibling set" meant every category in the
+    installation — exactly what a pre-portal caller still posts, and it is a
+    SECOND, DIFFERENT 422 now: the set can be exactly right and still be
+    refused, because it spans both portals. The client passes the server's own
+    sentence through; it does not paraphrase it or conflate it with the
+    stale-set 422 above."""
+    client, _ = make_client(MIXED_PORTAL_ORDER)
+
+    async with client:
+        with pytest.raises(InvalidRequestError) as raised:
+            await client.reorder_kb_categories(ids=[3, 9])
+
+    assert "single knowledge base portal" in str(raised.value)
+    assert "Reorder each portal in its own request" in str(raised.value)
+
+
 async def test_a_scope_refusal_is_not_narrowed_into_the_escalation_story(
     make_client,
 ) -> None:
@@ -442,6 +478,47 @@ async def test_it_states_the_whole_set_rule_loudly(tools) -> None:
     assert "Sending a subset is refused" in description
 
 
+async def test_the_clients_reorder_categories_docstring_carries_the_same_rule() -> None:
+    """The MCP tool's twin on `client.py` — the one a caller reads if it uses
+    the client directly rather than through an MCP host — states the same
+    server wording, so the rule is not only documented where the SDK renders
+    it."""
+    doc = " ".join((EbteqdeskClient.reorder_kb_categories.__doc__ or "").split())
+
+    assert (
+        "The order must list categories from a single knowledge base portal. "
+        "Reorder each portal in its own request." in doc
+    )
+    assert "ONE PORTAL'S WHOLE SET" in doc
+    assert "list_kb_tree(portal=\"salonv3\")" in doc
+    assert "list_kb_tree(portal=\"warni\")" in doc
+
+
+async def test_it_states_the_single_portal_rule_for_categories(tools) -> None:
+    """🔴 THE ONE CONTRACT CHANGE AN EXISTING CALLER CAN ACTUALLY NOTICE. A
+    caller written before Warni existed builds `ordered_ids` as EVERY category
+    in the installation — the whole-set rule above told it to — and that now
+    422s, on a DIFFERENT message than the stale-set one. The description has
+    to carry the server's exact wording, say the fix is one portal per request
+    rather than a shorter list, and say where a single portal's ids come from,
+    in the same paragraph as the problem."""
+    description = described(tools["reorder_kb_children"])
+
+    assert 'scope="categories"' in description
+    assert (
+        "The order must list categories from a single knowledge base portal. "
+        "Reorder each portal in its own request." in description
+    )
+    assert "NOT A SHORTER LIST" in description or "NOT a shorter list" in description
+    assert "list_kb_tree(portal=\"salonv3\")" in description
+    assert "list_kb_tree(portal=\"warni\")" in description
+
+    # And the unaffected scopes are told they are unaffected, and why.
+    assert 'scope="folders"' in description
+    assert 'scope="articles"' in description
+    assert "could ever span two portals" in description
+
+
 async def test_it_warns_that_an_internal_looking_folder_can_still_be_public(
     tools,
 ) -> None:
@@ -567,8 +644,12 @@ async def test_list_kb_categories_makes_one_tree_call_and_drops_the_folders(
     assert [row["id"] for row in rows] == [3, 5]
     # The folders are dropped — that is the whole projection.
     assert all("folders" not in row for row in rows)
-    # …and nothing else is. The remaining keys are the tree's own.
-    assert set(rows[0]) == {"id", "name", "slug", "description", "position"}
+    # …and nothing else is. The remaining keys are the tree's own, `portal`
+    # included — this projection strips `folders` only, so a category's
+    # knowledge base is still visible without a second call.
+    assert set(rows[0]) == {
+        "id", "name", "slug", "description", "position", "portal",
+    }
 
 
 async def test_list_kb_folders_flattens_every_category(wired) -> None:
@@ -608,6 +689,10 @@ async def test_list_kb_folders_flattens_every_category(wired) -> None:
 
     assert [row["id"] for row in rows] == [7, 8, 9]
     # The full folder shape survives — this flattens, it does not narrow.
+    # 🔴 PLUS `portal`, copied down from the parent category — the one field
+    # the flatten would otherwise lose, since `GET /api/v1/kb/tree` never puts
+    # it on a folder row itself. See test_kb_structure.py for the dedicated
+    # coverage of that copy.
     assert set(rows[0]) == {
         "id",
         "kb_category_id",
@@ -617,6 +702,7 @@ async def test_list_kb_folders_flattens_every_category(wired) -> None:
         "visibility",
         "position",
         "articles_count",
+        "portal",
     }
 
 
@@ -654,6 +740,102 @@ async def test_list_kb_folders_filters_by_category_after_the_fetch(wired) -> Non
     assert len(seen) == 1
     assert seen[0].url.path == "/api/v1/kb/tree"
     assert seen[0].url.query in (b"", None)
+
+
+@pytest.mark.parametrize("portal", ["salonv3", "warni", "all"])
+async def test_list_kb_categories_threads_portal_through_to_the_tree(
+    wired, portal: str
+) -> None:
+    """🔴 THE INCONSISTENCY THIS CLOSES: `list_kb_tree` gained `portal`, and
+    this IS `list_kb_tree` with `folders` dropped — a caller told to use this
+    tool for "what categories exist" could not narrow to one product's
+    without it."""
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(
+            200,
+            json=kb_tree_payload([kb_category_row(portal=portal)]),
+        )
+
+    wired(handler)
+
+    await srv.mcp.call_tool("list_kb_categories", {"portal": portal})
+
+    assert dict(seen[-1].url.params) == {"portal": portal}
+
+
+@pytest.mark.parametrize("portal", ["salonv3", "warni", "all"])
+async def test_list_kb_folders_threads_portal_through_to_the_tree(
+    wired, portal: str
+) -> None:
+    """🔴 THE MORE IMPORTANT HALF OF THE SAME FIX: this tool's own docstring
+    recommends it as the shortcut for picking `propose_kb_article`'s
+    `kb_folder_id`, so it has to be able to narrow to one knowledge base's
+    folders and not just carry `portal` on rows it cannot filter by."""
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(
+            200,
+            json=kb_tree_payload([kb_category_row(portal=portal)]),
+        )
+
+    wired(handler)
+
+    await srv.mcp.call_tool("list_kb_folders", {"portal": portal})
+
+    assert dict(seen[-1].url.params) == {"portal": portal}
+
+
+async def test_list_kb_folders_combines_portal_and_category_filters(wired) -> None:
+    """`kb_category_id` still filters AFTER the fetch, same as before `portal`
+    existed — the two filters compose rather than one replacing the other."""
+    wired(
+        always_json(
+            200,
+            kb_tree_payload(
+                [
+                    kb_category_row(
+                        id=3,
+                        portal="warni",
+                        folders=[kb_folder_row(id=7, kb_category_id=3)],
+                    ),
+                ]
+            ),
+        )
+    )
+
+    result = await srv.mcp.call_tool(
+        "list_kb_folders", {"portal": "warni", "kb_category_id": 3}
+    )
+
+    rows = result.structured_content["data"]
+    assert [row["id"] for row in rows] == [7]
+    assert rows[0]["portal"] == "warni"
+
+
+@pytest.mark.parametrize("tool", ["list_kb_categories", "list_kb_folders"])
+async def test_both_projections_sit_behind_the_stale_portal_guard(
+    wired, tool: str
+) -> None:
+    """🔴 THE WHOLE POINT OF GIVING THESE TWO `portal`: WITHOUT IT, A STALE
+    INSTALL'S UNFILTERED TREE WOULD PASS THROUGH THIS FLATTENED VIEW SILENTLY
+    — worse than on `list_kb_tree` itself, because nothing in a flat row says
+    which portal it should have been narrowed to. Categories with no `portal`
+    key at all is the shape an install predating two-knowledge-base support
+    answers with."""
+    stale_category = {
+        key: value for key, value in kb_category_row().items() if key != "portal"
+    }
+    wired(always_json(200, kb_tree_payload([stale_category])))
+
+    with pytest.raises(ToolError) as excinfo:
+        await srv.mcp.call_tool(tool, {"portal": "warni"})
+
+    assert "predates two-knowledge-base" in str(excinfo.value)
 
 
 async def test_an_unknown_category_filter_is_an_empty_list_not_an_error(wired) -> None:

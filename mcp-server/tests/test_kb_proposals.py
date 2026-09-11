@@ -118,6 +118,19 @@ async def test_paging_parameters_are_sent(make_client) -> None:
     }
 
 
+@pytest.mark.parametrize("portal", ["salonv3", "warni", "all"])
+async def test_each_legal_portal_is_sent_verbatim(make_client, portal: str) -> None:
+    """🔴 OMITTING `portal` SENDS NOTHING, NOT `portal=salonv3`. The server's own
+    default for an absent param IS `salonv3`, so a client that filled it in
+    would send the exact same request while now depending on knowing that
+    default — a dependency worth removing, not adding."""
+    client, recorder = make_client(always_json(200, kb_proposal_list()))
+
+    await client.list_kb_proposals(portal=portal)
+
+    assert dict(recorder.last.url.params) == {"portal": portal}
+
+
 async def test_per_page_is_not_clamped_locally(make_client) -> None:
     """🔴 SENT AS GIVEN. Out of range is the server's 422, never a silent clamp —
     clamping here would hide the caller's mistake and make this client disagree
@@ -184,7 +197,9 @@ async def test_the_client_offers_no_way_to_scope_the_list_to_the_caller(
     change to this default."""
     signature = inspect.signature(EbteqdeskClient.list_kb_proposals)
 
-    assert set(signature.parameters) == {"self", "review_state", "per_page", "page"}
+    assert set(signature.parameters) == {
+        "self", "review_state", "per_page", "page", "portal",
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -205,7 +220,7 @@ async def test_the_review_state_argument_is_an_enum_in_the_schema(tools) -> None
     schema = tools["list_kb_proposals"].input_schema
     properties = schema.get("properties", {})
 
-    assert set(properties) == {"review_state", "per_page", "page"}
+    assert set(properties) == {"review_state", "per_page", "page", "portal"}
 
     rendered = str(properties["review_state"])
 
@@ -214,6 +229,13 @@ async def test_the_review_state_argument_is_an_enum_in_the_schema(tools) -> None
 
     # `none` is not an argument value at all — it is a 422.
     assert "'none'" not in rendered and '"none"' not in rendered
+
+    # 🔴 `portal` IS THE SAME CLOSED VOCABULARY AS THE OTHER THREE READS, and
+    # for the same reason: a typo is caught by the SDK before this ever reaches
+    # Ebteqdesk, rather than surfacing as the server's 422.
+    portal_rendered = str(properties["portal"])
+    for value in ("salonv3", "warni", "all"):
+        assert value in portal_rendered
 
 
 async def test_the_description_says_it_is_not_your_proposals(tools) -> None:
@@ -289,6 +311,39 @@ async def test_the_tool_passes_its_arguments_through(wired) -> None:
         "page": "2",
     }
     assert "id:7" in str(result)
+
+
+async def test_the_tool_threads_portal_through(wired) -> None:
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(200, json=kb_proposal_list())
+
+    wired(handler)
+
+    await srv.mcp.call_tool("list_kb_proposals", {"portal": "warni"})
+
+    assert dict(seen[-1].url.params) == {"portal": "warni"}
+
+
+async def test_an_unrecognised_portal_is_rejected_before_it_is_sent(wired) -> None:
+    """🔴 THE SDK VALIDATES `Literal` AGAINST THE SCHEMA BEFORE THIS TOOL BODY
+    EVER RUNS, so a typo never reaches Ebteqdesk as a wasted round trip and
+    never surfaces as the server's 422 — the enum in the schema is what a
+    client can validate a call against before sending it at all."""
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(200, json=kb_proposal_list())
+
+    wired(handler)
+
+    with pytest.raises(ToolError):
+        await srv.mcp.call_tool("list_kb_proposals", {"portal": "salonv2"})
+
+    assert seen == []
 
 
 async def test_the_tool_needs_the_kb_write_scope(wired) -> None:

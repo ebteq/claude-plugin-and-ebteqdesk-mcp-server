@@ -124,6 +124,49 @@ async def test_out_of_range_per_page_is_passed_through_not_clamped(make_client) 
     assert dict(recorder.last.url.params)["per_page"] == "999"
 
 
+@pytest.mark.parametrize("portal", ["salonv3", "warni", "all"])
+async def test_search_kb_articles_sends_portal_verbatim(make_client, portal: str) -> None:
+    client, recorder = make_client(OK)
+
+    async with client:
+        await client.search_kb_articles(portal=portal)
+
+    assert dict(recorder.last.url.params) == {"portal": portal}
+
+
+async def test_search_kb_articles_omits_portal_when_none(make_client) -> None:
+    """🔴 OMITTED MEANS `"salonv3"` SERVER-SIDE, NOT `"all"`. Sending nothing
+    reproduces exactly what every caller written before Warni existed already
+    got, which is the whole point of the default."""
+    client, recorder = make_client(OK)
+
+    async with client:
+        await client.search_kb_articles()
+
+    assert b"portal=" not in recorder.last.url.query
+
+
+@pytest.mark.parametrize("portal", ["salonv3", "warni", "all"])
+async def test_get_kb_article_sends_portal_verbatim(make_client, portal: str) -> None:
+    client, recorder = make_client(OK)
+
+    async with client:
+        await client.get_kb_article("resetting-your-password", portal=portal)
+
+    assert dict(recorder.last.url.params) == {"portal": portal}
+
+
+async def test_get_kb_article_combines_locale_and_portal(make_client) -> None:
+    client, recorder = make_client(OK)
+
+    async with client:
+        await client.get_kb_article(
+            "resetting-your-password", locale="zhcn", portal="warni"
+        )
+
+    assert dict(recorder.last.url.params) == {"locale": "zhcn", "portal": "warni"}
+
+
 async def test_pagination_parameter_is_sent_on_both_ticket_endpoints(make_client) -> None:
     client, recorder = make_client(OK)
 

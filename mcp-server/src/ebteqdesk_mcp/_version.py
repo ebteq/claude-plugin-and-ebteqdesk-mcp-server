@@ -455,4 +455,54 @@ __all__ = ["__version__"]
 #: be obtained from the API itself — `issue_api_key` subtracts them
 #: unconditionally, so they come from a signed-in human at Settings > API keys
 #: and from nowhere else.
-__version__ = "4.2.0"
+#:
+#: 4.3.0 — TWO KNOWLEDGE BASES. A MINOR, on the same claim as every minor above
+#: it: nothing an existing caller wrote can break. `list_kb_tree`,
+#: `search_kb_articles`, `get_kb_article`, `list_kb_proposals`,
+#: `list_kb_categories`, `list_kb_folders` and `create_kb_category` each gain
+#: one new OPTIONAL argument, `portal`, and every one of them treats its
+#: absence as `"salonv3"` — exactly what each already did before Ebteqdesk
+#: grew a second knowledge base (`"warni"`). No existing argument's name, type
+#: or default moved, and no tool's return shape lost a key; `list_kb_tree`'s
+#: categories, `list_kb_categories`'s rows and `create_kb_category`'s response
+#: all GAIN a `portal` key, which is additive the same way `admin:*`'s new
+#: rows were in 4.2.0. `update_kb_article`, `propose_kb_article` and the folder
+#: writes are untouched — `kb_folder_id` already carries the portal, and a
+#: second, conflicting `portal` argument there would be a regression, not a
+#: feature.
+#:
+#: 🔴 THIS SHIPS AHEAD OF THE APP IT TALKS TO, DELIBERATELY, WHICH IS WHY
+#: `StalePortalApiError` EXISTS. An Ebteqdesk install that has not yet deployed
+#: portal-aware `GET /api/v1/kb/*` filtering answers a `portal`-filtered
+#: `list_kb_tree` call with its old, unfiltered 200 — Laravel drops a query
+#: parameter no route declares rather than rejecting it — so `client.py` checks
+#: the one shape signal it has (categories missing a `portal` key entirely)
+#: and raises instead of handing back rows that look filtered and are not. That
+#: check is why this is 4.3.0 and not 4.2.1: a NEW FAILURE MODE, reachable only
+#: by passing `portal`, is exactly the kind of caller-observable behaviour this
+#: file's rule bumps a version for, even though nothing already-working moved.
+#: `list_kb_categories` and `list_kb_folders` sit behind the same guard for
+#: free, since both are projections that get their data by calling
+#: `list_kb_tree` themselves.
+#:
+#: ⚠️ ALSO FIXED HERE, NOT A NEW ARGUMENT: `list_kb_folders` used to drop each
+#: folder's portal on the floor when it flattened folders out of their
+#: categories — `kb_category_id` survived the flatten, `portal` did not, and
+#: this tool's own docstring recommends it as the shortcut for picking a
+#: destination folder. Folders now carry `portal`, copied down from their
+#: category, which is a bug fix restoring information the shape always implied
+#: rather than a behaviour a caller could have depended on the absence of.
+#:
+#: 🔴 ALSO DOCUMENTED HERE, NOT A CODE CHANGE: `reorder_kb_children` on
+#: `scope="categories"` now inherits a BREAKING change already live on the
+#: server it talks to — `PUT /api/v1/kb/categories/order` 422s on `errors.ids`
+#: when the posted set spans both portals, where before it required every
+#: category in the installation. This package's own dispatch and arguments do
+#: not move; what changes is that a caller following the tool's OWN "post the
+#: whole set" instruction now has to read one portal's whole set, not the
+#: installation's, and the docstring — on `reorder_kb_children` and its
+#: `client.py` twin `reorder_kb_categories` — says so. Recorded here because a
+#: description that materially changes is this file's rule for a minor same as
+#: an argument gaining one, and this is the entry most likely to explain a
+#: support ticket: "reordering categories used to work and now 422s".
+__version__ = "4.3.0"

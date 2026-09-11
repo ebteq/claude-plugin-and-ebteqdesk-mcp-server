@@ -1298,13 +1298,17 @@ working control and silently do nothing.
 ⚠️ **Renaming a category or a folder changes its portal URL.** Unlike an
 *article's* slug, which is frozen at first publish and never moves again, a
 category or folder slug is re-derived from its name on every save — and both are
-segments of the nested portal address `/support/kb/{category}/{folder}`. There is
-no redirect. The response carries the new `slug`.
+segments of the nested portal address `/support/salonv3-kb/{category}/{folder}`
+or `/support/warni-kb/{category}/{folder}`, depending which of the two
+knowledge bases the category belongs to. There is no redirect. The response
+carries the new `slug`.
 
 ⚠️ **Name collisions are a `422` on `name`, checked against the *derived* slug.**
-So "POS" and `  p.o.s!  ` collide. Category slugs are unique **globally**; folder
-slugs are unique **only within their category**, so the same folder name under
-two categories is fine and is the point.
+So "POS" and `  p.o.s!  ` collide. There are **three slug scopes, not two**:
+category slugs are unique **per portal** (Salon V3 and Warni may each have
+their own "POS"), folder slugs are unique **only within their category**, so
+the same folder name under two categories is fine and is the point, and
+article slugs are unique **globally** across both portals.
 
 🔴 **`delete_kb_category` and `delete_kb_folder` are the only tools here that
 destroy anything, and there is no undo.** No trash, no restore, no version

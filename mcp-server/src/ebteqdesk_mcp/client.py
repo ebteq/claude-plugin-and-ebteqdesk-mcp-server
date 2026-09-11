@@ -46,6 +46,7 @@ from .errors import (
     LocalFileError,
     MalformedResponseError,
     ScopeError,
+    StalePortalApiError,
     TransportError,
     api_error_for,
     NotFoundError,
@@ -543,6 +544,7 @@ class EbteqdeskClient:
         review_state: str | None = None,
         per_page: int | None = None,
         page: int | None = None,
+        portal: str | None = None,
     ) -> dict[str, Any]:
         """GET /api/v1/kb/proposals — every held, approved and rejected article.
 
@@ -584,6 +586,14 @@ class EbteqdeskClient:
         reason: clamping locally would hide a caller's mistake and make this
         client disagree with curl.
 
+        `portal` — `"salonv3"`, `"warni"` or `"all"` — narrows the queue to one
+        knowledge base or interleaves both, OMITTED-MEANS-`"salonv3"` for the
+        same reason `search_kb_articles`'s is. Its rows nest a `{slug, name}`
+        `category` pair with no `portal` field, upgraded install or not, so —
+        same caveat as `search_kb_articles` — this method has no local signal
+        for an install that silently ignored the filter; verify with
+        `list_kb_tree(portal=...)` first if that matters here.
+
         ⚠️ `kb:write`, NOT `kb:read`, even though this only reads — and it
         writes nothing at all. Same reasoning as `get_kb_article_review`: the
         corpus is drafts, the corpus PATCH addresses, while `kb:read` is
@@ -596,6 +606,8 @@ class EbteqdeskClient:
             params["review_state"] = review_state
         if per_page is not None:
             params["per_page"] = per_page
+        if portal is not None:
+            params["portal"] = portal
         params.update(_page_params(page))
 
         return await self._get("/api/v1/kb/proposals", params=params)
@@ -675,6 +687,7 @@ class EbteqdeskClient:
         query: str | None = None,
         per_page: int | None = None,
         page: int | None = None,
+        portal: str | None = None,
     ) -> dict[str, Any]:
         """GET /api/v1/kb/articles — the public KB corpus, optionally searched.
 
@@ -686,6 +699,19 @@ class EbteqdeskClient:
         clamp, so the value is passed through unvalidated on purpose: clamping
         it locally would hide a caller's mistake and make this client disagree
         with curl.
+
+        `portal` — `"salonv3"`, `"warni"` or `"all"` — narrows the corpus to one
+        knowledge base or interleaves both. 🔴 OMITTING IT MEANS `"salonv3"`,
+        NOT `"all"`, so a caller written before portals existed keeps its old
+        behaviour unchanged. An unrecognised value is a 422 naming the field.
+
+        ⚠️ THIS METHOD DOES NOT GUARD AGAINST AN INSTALL THAT IGNORES `portal`.
+        Unlike `list_kb_tree`, nothing in this corpus's row shape carries a
+        `portal` field — `data[].category` is the same `{slug, name}` pair it
+        has always been — so there is no local signal to tell "filtered to one
+        portal" apart from "the install silently returned both". Call
+        `list_kb_tree(portal=...)` once to confirm the install understands
+        `portal` before trusting a filtered read here.
 
         The corpus is published, publicly-visible articles ONLY, even for an
         administrator's token. Internal runbooks readable in the web KB are not
@@ -715,11 +741,15 @@ class EbteqdeskClient:
             params["q"] = query.strip()
         if per_page is not None:
             params["per_page"] = per_page
+        if portal is not None:
+            params["portal"] = portal
         params.update(_page_params(page))
 
         return await self._get("/api/v1/kb/articles", params=params)
 
-    async def get_kb_article(self, slug: str, *, locale: str | None = None) -> dict[str, Any]:
+    async def get_kb_article(
+        self, slug: str, *, locale: str | None = None, portal: str | None = None
+    ) -> dict[str, Any]:
         """GET /api/v1/kb/articles/{slug} — one article with its body.
 
         `data.body_html` is SANITISED HTML, not markdown — `kb_articles.body`
@@ -728,6 +758,17 @@ class EbteqdeskClient:
         Same corpus and same effective-visibility rule as `search_kb_articles`,
         including the null `folder` on an article that overrides an internal
         folder. See that method.
+
+        `portal` narrows which knowledge base's slug namespace is searched —
+        `"salonv3"`, `"warni"` or `"all"` — and is OMITTED-MEANS-`"salonv3"` for
+        the same reason `search_kb_articles`'s is. Article slugs are unique
+        GLOBALLY across both portals (unlike category slugs, which are now
+        unique only per portal — see `create_kb_category`), so `portal` narrows
+        which installs' 404 you get more than which article you find; it exists
+        for symmetry with the other three reads. Same caveat as
+        `search_kb_articles`: this row shape carries no `portal` field either,
+        upgraded install or not, so this method cannot detect a stale one on
+        its own — verify with `list_kb_tree(portal=...)` first.
 
         🔴 The 404 is BYTE-IDENTICAL for a hidden article and for a slug that
         never existed, and does not echo the slug back. That is deliberate: an
@@ -773,18 +814,22 @@ class EbteqdeskClient:
                 f"'resetting-your-password', not {slug!r}."
             )
 
-        params = {} if locale is None else {"locale": locale}
+        params: dict[str, str] = {}
+        if locale is not None:
+            params["locale"] = locale
+        if portal is not None:
+            params["portal"] = portal
 
         return await self._get(f"/api/v1/kb/articles/{clean}", params=params)
 
-    async def list_kb_tree(self) -> dict[str, Any]:
+    async def list_kb_tree(self, *, portal: str | None = None) -> dict[str, Any]:
         """GET /api/v1/kb/tree — the category → folder structure, WITH IDS.
 
         200 ``{"data": [{"id", "name", "slug", "description", "position",
-        "folders": [{"id", "kb_category_id", "name", "slug", "description",
-        "visibility", "position", "articles_count"}]}]}``. Ordered
-        `position, id` at both levels; `folders` is always present and is `[]`
-        for a category with none.
+        "portal", "folders": [{"id", "kb_category_id", "name", "slug",
+        "description", "visibility", "position", "articles_count"}]}]}``.
+        Ordered `position, id` at both levels; `folders` is always present and
+        is `[]` for a category with none.
 
         🔴 THIS IS THE ONLY SOURCE OF `kb_folder_id`. `propose_kb_article`
         requires one and NOTHING else on this API returns a folder id — the
@@ -792,6 +837,34 @@ class EbteqdeskClient:
         this route the KB write surface was unusable against a knowledge base
         whose structure the caller could not see, and unusable at all against an
         empty one.
+
+        🔴 THE TREE SPANS TWO KNOWLEDGE BASES, SALON V3 (`"salonv3"`) and WARNI
+        (`"warni"`), and every category carries which one it belongs to in its
+        own `portal` key — `folders` and the articles filed under them inherit
+        it transitively and do not repeat it. Because `kb_folder_id` is the one
+        thing `propose_kb_article` can never change afterwards, PICKING A
+        FOLDER OFF THIS TREE PICKS A PORTAL, permanently. Read a category's
+        `portal` before handing its folders to a caller who has not said which
+        product they mean.
+
+        `portal` — one of `"salonv3"`, `"warni"` or `"all"` — filters which
+        categories come back. 🔴 OMITTING IT IS NOT `"all"`: it means
+        `"salonv3"`, so every caller written before portals existed keeps
+        seeing exactly what it always did. Passing `"all"` INTERLEAVES the two
+        portals' categories rather than concatenating them, because `position`
+        is dense per portal — both commonly have a category at `0` — so do not
+        assume a portal's categories are contiguous in the returned list; group
+        by `portal` if you need them separated. An unrecognised value is a 422
+        naming the field, not a silent fall-through to `"salonv3"`.
+
+        🔴 IF `portal` WAS PASSED AND THE CATEGORIES CAME BACK WITH NO `portal`
+        KEY AT ALL, this raises `StalePortalApiError` instead of returning
+        them. That shape means the Ebteqdesk install predates two-knowledge-base
+        support and SILENTLY IGNORED the filter — Laravel drops a query
+        parameter no route declares rather than rejecting it — so what came
+        back is BOTH portals unfiltered, not the one that was asked for. See
+        that exception; the check costs nothing extra, since it reads the
+        response this method already fetched.
 
         ⚠️ NOT VISIBILITY-FILTERED, unlike `search_kb_articles`. It returns
         `agents`-only folders, because the bound on this surface is the SCOPE and
@@ -811,7 +884,15 @@ class EbteqdeskClient:
         one path would be decided by registration order and one of them would be
         silently dead.
         """
-        return await self._get("/api/v1/kb/tree")
+        params = {} if portal is None else {"portal": portal}
+        data = await self._get("/api/v1/kb/tree", params=params)
+
+        if portal is not None:
+            categories = data.get("data") or []
+            if categories and any("portal" not in category for category in categories):
+                raise StalePortalApiError(portal)
+
+        return data
 
     # ------------------------------------------------------------------ #
     # The nineteen WRITE endpoints
@@ -1562,22 +1643,43 @@ class EbteqdeskClient:
     # visibility, no cascade flag, no dry run.
 
     async def create_kb_category(
-        self, *, name: str, description: str | None = None
+        self,
+        *,
+        name: str,
+        description: str | None = None,
+        portal: str | None = None,
     ) -> dict[str, Any]:
         """POST /api/v1/kb/categories — a new top-level category. 201.
 
-        ``{"data": {"id", "name", "slug", "description", "position",
+        ``{"data": {"id", "name", "slug", "description", "position", "portal",
         "folders": []}}`` — the same shape `list_kb_tree` nests, so the new `id`
         is immediately usable as `create_kb_folder`'s `kb_category_id`.
 
         🔴 THE SLUG IS DERIVED FROM THE NAME AND IS NOT ACCEPTED. It is also
         RE-DERIVED on every rename — see `update_kb_category`.
 
-        ⚠️ UNIQUENESS IS CHECKED ON THE DERIVED SLUG, GLOBALLY, and a collision
-        is a 422 on `name`. Two names that differ as strings can be one slug:
-        "POS", "pos" and "  p.o.s!  " all slugify to `pos`. Without that check
-        the server would silently store `pos-2` and the operator would end up
-        with two visually identical categories at two URLs.
+        ⚠️ UNIQUENESS IS CHECKED ON THE DERIVED SLUG, PER PORTAL, and a
+        collision is a 422 on `name`. Two names that differ as strings can be
+        one slug: "POS", "pos" and "  p.o.s!  " all slugify to `pos`. Without
+        that check the server would silently store `pos-2` and the operator
+        would end up with two visually identical categories at two URLs.
+        🔴 THE SCOPE NARROWED: before two-knowledge-base support this
+        uniqueness was checked GLOBALLY; a "POS" category in Salon V3 and a
+        "POS" category in Warni collide with EACH OTHER no longer — the check
+        is now per `portal`, so the same name is free to exist once in each
+        knowledge base.
+
+        `portal` is `"salonv3"` or `"warni"` — 🔴 `"all"` IS NOT A VALID VALUE
+        HERE and is a 422, unlike on the four read tools; a category has to
+        belong to exactly one knowledge base to be created. Absent, `null` or
+        `""` all mean `"salonv3"`, matching this client's pre-two-portal
+        default. The response echoes the `portal` it was actually given.
+
+        🔴 A CATEGORY'S PORTAL IS WRITE-ONCE. There is no way to move an
+        existing category to the other knowledge base through this API —
+        `update_kb_category` does not accept `portal` at all; see that method.
+        Choose it deliberately here, since it decides which public help site
+        every folder and article under this category can ever reach.
 
         `description` is omitted from the body when None so the column default
         (NULL) applies, rather than this client keeping a second copy of it.
@@ -1586,7 +1688,7 @@ class EbteqdeskClient:
         it AND the owner's role carries `kb.manage`.
         """
         payload: dict[str, Any] = {"name": name}
-        payload.update(_kb_optional_fields(description=description))
+        payload.update(_kb_optional_fields(description=description, portal=portal))
 
         return await self._request("POST", "/api/v1/kb/categories", json=payload)
 
@@ -1601,18 +1703,32 @@ class EbteqdeskClient:
 
         🔴 RENAMING RE-DERIVES THE SLUG, WHICH IS PART OF A PORTAL URL. Unlike
         an article's — frozen at first publish and never moved again — a
-        category slug follows its name on every save, and it is a segment of the
-        nested portal URL `/support/kb/{category}/{folder}`. So a rename here
-        changes the URL of every folder page beneath it. The response carries the
-        new `slug`, which is the only way a caller learns what it broke.
+        category slug follows its name on every save, and it is a segment of
+        the nested portal URL `/support/salonv3-kb/{category}/{folder}` or
+        `/support/warni-kb/{category}/{folder}`, depending which knowledge base
+        the category belongs to. So a rename here changes the URL of every
+        folder page beneath it. The response carries the new `slug`, which is
+        the only way a caller learns what it broke.
+
+        🔴 THERE IS NO `portal` PARAMETER HERE, ON PURPOSE, AND THAT IS NOT AN
+        OVERSIGHT MATCHING `create_kb_category`'s. A category's knowledge base
+        is fixed at creation and this endpoint DROPS a `portal` key sent to it
+        rather than rejecting it — same silent-ignore contract as `visibility`
+        on the folder writes above. A category's portal is write-once; there is
+        no move endpoint, through this API or otherwise, so filing into the
+        wrong knowledge base at creation is not something a later PATCH can
+        undo.
 
         An ABSENT key is not edited; a key present and EMPTY is an edit
         (`description=""` clears it, via the server's blank-collapses-to-NULL
         mutator). That is why None is dropped here rather than sent as null —
         the same rule `update_kb_article` follows.
 
-        A name colliding on the derived slug is a 422 on `name`; the row excludes
-        itself, so re-saving a category under its own name is not a collision.
+        A name colliding on the derived slug is a 422 on `name`, checked
+        against categories in the SAME PORTAL ONLY; the row excludes itself, so
+        re-saving a category under its own name is not a collision, and nor is
+        renaming it to a name already used by a category in the OTHER
+        knowledge base.
 
         404 if no category has that id, as JSON with a constant message that does
         not echo the id back.
@@ -1877,16 +1993,38 @@ class EbteqdeskClient:
     # and have no parent, so `reorder_kb_categories` takes no parent argument at
     # all. The MCP tool that fronts all three refuses a `parent_id` on that scope
     # client-side rather than sending one the URL has nowhere to put.
+    #
+    # 🔴 "THE WHOLE SIBLING SET" NARROWED TO ONE PORTAL FOR CATEGORIES ONLY,
+    # since two-knowledge-base support. `reorder_kb_categories` now refuses a
+    # list spanning both Salon V3 and Warni — see its own docstring for the
+    # server's exact wording. `reorder_kb_folders` and `reorder_kb_articles`
+    # need no equivalent note: a folder's siblings are one category's folders
+    # and an article's siblings are one folder's articles, and a category
+    # belongs to exactly one portal, so neither sibling set could ever span two.
 
     async def reorder_kb_categories(self, *, ids: Sequence[int]) -> dict[str, Any]:
-        """PUT /api/v1/kb/categories/order — reorder ALL categories. 200.
+        """PUT /api/v1/kb/categories/order — reorder ONE PORTAL'S categories. 200.
 
-        ``{"data": [ …every category, in its new order… ]}`` in the same shape
-        `list_kb_tree` nests at the top level, `folders` included.
+        ``{"data": [ …that portal's categories, in their new order… ]}`` in the
+        same shape `list_kb_tree` nests at the top level, `folders` included.
 
         `ids` is the COMPLETE ordered list of category ids — see the block
         comment above. A partial list, a superset, or a duplicate is a 422 on
         `ids` and nothing is written.
+
+        🔴 BREAKING SINCE TWO-KNOWLEDGE-BASE SUPPORT: `ids` MUST BE ONE
+        PORTAL'S WHOLE SET, NEVER BOTH PORTALS'. Before Salon V3 and Warni
+        existed, "the complete sibling set" meant every category in the
+        installation, and a caller built that way now gets a 422 on `ids`:
+        *"The order must list categories from a single knowledge base portal.
+        Reorder each portal in its own request."* The fix is not "smaller
+        list" — it is still that portal's WHOLE set — read one portal's
+        categories with `list_kb_tree(portal="salonv3")` or
+        `list_kb_tree(portal="warni")`, reorder it, then repeat the call for
+        the other portal if both need reordering. Folder and article reorders
+        are unaffected: a folder's siblings are one category's folders and an
+        article's siblings are one folder's articles, and neither of those
+        sibling sets can span portals in the first place.
 
         Requires the `kb:write` scope, which resolves only while the key carries
         it AND the owner's role carries `kb.manage`. `kb:read` reaches none of

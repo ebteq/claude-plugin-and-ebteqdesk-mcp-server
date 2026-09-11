@@ -601,6 +601,21 @@ async def test_the_propose_tool_flags_the_folder_as_permanent(tools) -> None:
     assert "ask the user rather than guessing" in description
 
 
+async def test_the_propose_tool_flags_the_folder_as_a_permanent_portal_choice(
+    tools,
+) -> None:
+    """🔴 THE SAME PERMANENCE, RESTATED FOR THE OTHER THING A FOLDER FIXES.
+    `kb_folder_id` decides both the article's visibility AND its knowledge
+    base, and getting the second one wrong is worse: there is no delete-article
+    tool to remove a Warni article stranded in Salon V3's public help site."""
+    description = described(tools["propose_kb_article"])
+
+    assert "PICKS THE PORTAL" in description
+    assert "Salon V3" in description and "Warni" in description
+    assert "PERMANENTLY" in description
+    assert "no delete-article tool" in description
+
+
 async def test_the_kb_tools_say_tags_replace_rather_than_merge(tools) -> None:
     for name in ("propose_kb_article", "update_kb_article"):
         description = described(tools[name])
