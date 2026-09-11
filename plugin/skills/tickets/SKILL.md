@@ -5,7 +5,7 @@ description: Work Ebteqdesk support tickets — list or search the queue, open a
 
 # Ebteqdesk tickets
 
-Verified against `ebteqdesk-mcp` 1.6.0 (32 tools).
+Verified against `ebteqdesk-mcp` 4.3.0 (42 tools).
 
 You are working a **live helpdesk**. Real customers receive what you send.
 
@@ -130,8 +130,8 @@ state do not:
 
 | Tool | Ordinary ticket | Escalated ticket |
 |---|---|---|
-| `comment_on_ticket` | `ticket:write` + `ticket.reply` | `ticket:write` **+ `escalation:write`** |
-| `add_private_note` | `ticket:write` + `ticket.reply` | `ticket:write` **+ `escalation:write`** (and the `bp_escalation.reply` ability) |
+| `comment_on_ticket` | `ticket:write` + `ticket.reply` | **`escalation:write` + `escalation:read`** (and the `bp_escalation.reply` ability) |
+| `add_private_note` | `ticket:write` + `ticket.reply` | **`escalation:write` + `escalation:read`** (and the `bp_escalation.reply` ability) |
 | `close_ticket` | `ticket:write` + `ticket.close` | **identical — no escalation branch at all** |
 | `set_ticket_status` | `ticket:write` + `ticket.reply` | **identical — no escalation branch at all** |
 
@@ -143,8 +143,9 @@ who may **speak** on a handed-off ticket, and neither `close_ticket` nor
 
 Check `data.escalated` — the boolean, never the nullable `escalated_at` — before
 you reach for a reply tool. If you did not check, the refusal tells you: a 403
-naming `escalation:write` from `comment_on_ticket` means the ticket is
-escalated, because that is the only way that endpoint can ask for that scope.
+naming `escalation:write`, `escalation:read` or `bp_escalation.reply` from
+`comment_on_ticket` means the ticket is escalated, because that is the only way
+that endpoint can ask for any of those.
 
 ## 🔴 "What is the status?" means SHOW THE WHOLE THREAD
 
@@ -196,6 +197,20 @@ are staff-only" below.
 at **20 rows per page** — asking for more is an error, not a quietly smaller
 page. Page with `page` / `per_page`.
 
+🔴 **Both take a `scope` argument, and it is a WIDE read.** Omit it (or pass
+`"mine"`) for the token's own tickets — the default, and identical to leaving
+it out. Pass `scope="all"` for **every ticket in the account**, which is
+refused with a 403 unless the account's ROLE holds `ticket_all.view`
+(Administrator and Supervisor only). 🔴 **`ticket_all.view` is a role
+ability, not a scope** — it never appears in `whoami`'s `apiKey.scopes`, so
+look for it in `apiKey`'s owning account's `permissions` instead, and do not
+retry a `scope="all"` refusal with a new key; it will refuse the same way
+every time. Prefer the default unless the task genuinely needs the whole
+account, and say so when you use `"all"` — an answer built from every ticket
+in the installation is a different claim from one built from this agent's own
+queue. Any value other than `"mine"`/`"all"`/omitted is refused too; there is
+no way to list a single *other* agent's tickets.
+
 `get_ticket(ticket_id)` is the one that matters. It returns the ticket plus
 `conversation`, oldest first, where every entry has a `kind`:
 
@@ -225,10 +240,24 @@ paste a note into `comment_on_ticket`; nothing stops you but you.
 ### Attachments
 
 When the answer depends on what is in a screenshot, call
-`get_ticket_attachment(attachment_id)` and actually look at it. Get the id from
-`get_ticket`: `data.attachments[].id` for the opening message's files, or
-`data.conversation[].attachments[].id` for a reply's or a note's. It returns an
-image; it is for images only.
+`get_ticket_attachment(attachment_id, max_dimension)` and actually look at it.
+Get the id from `get_ticket`: `data.attachments[].id` for the opening
+message's files, or `data.conversation[].attachments[].id` for a reply's or a
+note's.
+
+⚠️ **The image comes back downscaled — 1568px on the longest edge by
+default — and that is not a corner case.** Small text, exact pixel values and
+low-contrast detail may be illegible at that size. If you cannot read
+something, say so and retry with a larger `max_dimension` (1..4096) rather
+than guessing at a serial number or an error code. Read the response's
+`downscaled` flag rather than comparing byte sizes to judge fidelity — a
+shrunk, re-encoded screenshot can come back as a *larger* file than the
+original.
+
+⚠️ **Video attachments answer 415 and are never returned** — this tool serves
+images only. Check `mime_type` on the attachment first if you want to avoid
+the round trip, and tell the user the file needs to be opened in Ebteqdesk in
+a browser.
 
 ## Replying
 
@@ -243,10 +272,24 @@ Reaching for `comment_on_ticket` when you meant a note is how an internal remark
 gets mailed to a customer. Notes are also permanent — there is no note-editing
 or note-deleting tool anywhere on this API.
 
+🔴 **The response's `comment.id` can be `null`, and that means nothing was
+filed.** Ebteqdesk silently discards a public reply identical to the author's
+saved signature, and a private note that is empty in substance, the same way
+both times: the call still answers 201 and the ticket is still touched, but no
+comment row exists. **Check `comment.id` before telling the user the reply
+went out or the note was recorded** — a null id means it was not.
+
+⚠️ **`comment_on_ticket` only reaches a ticket assigned to your own account.**
+A shared-queue ticket assigned to somebody else refuses it with a 403 whose
+reason is `ticket_not_assigned` — not a scope problem, and not fixed by a new
+key. `add_private_note` is the one ticket write that reaches beyond your own
+queue (see the `escalations` skill); this one does not.
+
 Draft the reply, show it to the user, and send only once they have said yes.
 
 **If the ticket is escalated** (`data.escalated` is `true`), replying — public
-or private — needs the `escalation:write` scope on top of `ticket:write`, while
+or private — needs `escalation:write` **and** `escalation:read` on top of
+`ticket:write`, plus the `bp_escalation.reply` role ability, while
 `close_ticket` and `set_ticket_status` need nothing extra at all. See the
 asymmetry table above. The escalation queue also has its own conventions; use
 the `escalations` skill for those tickets.
@@ -262,6 +305,14 @@ the `escalations` skill for those tickets.
 Default to 5. Only pass 4 when the user has explicitly asked to send the survey.
 Never use `close_ticket` to tidy up test data.
 
+⚠️ **Whether `status=4` actually sends mail is an installation setting you
+cannot see.** An install may set `EBTEQDESK_RATING_EMAIL_ENABLED=false` to
+suppress the survey server-side, but the code default is ON, nothing in this
+API's responses reports which way it is set, and this client has no way to
+read it. Treat `status=4` as sending mail unless a human tells you otherwise
+for this install, and never report "the survey is disabled here" as a fact
+you established yourself.
+
 It takes **no message argument**. Reply first with `comment_on_ticket`, then
 close — see "Reply BEFORE you close" above.
 
@@ -271,13 +322,34 @@ a ticket back to a working state; the two tools are disjoint on purpose.
 ## Opening a ticket
 
 `create_ticket(subject, description, requester, ...)` — `requester` identifies
-the customer, e.g. `{"email": "ada@example.com", "name": "Ada Lovelace"}`, and
-may create a contact record if that email is new. Optional: `priority`,
-`status`, `category`, `reference_number`, `tags`.
+the customer, as one of two shapes:
+
+- `{"id": 12}` — an **existing** contact, exact, from `requester.id` on a
+  ticket `list_tickets` returned. Creates nothing. Prefer this whenever you
+  have an id.
+- `{"email": "ada@example.com", "name": "Ada Lovelace"}` — find-or-create,
+  matched on the **email**. If no contact has that address, **one is
+  created**. `name` is used only when the contact is newly created — it will
+  not rename an existing one, so a mistyped name next to a known address is
+  harmless but also silently ignored.
+
+If both `id` and `email` are given, `id` wins and `email` is ignored.
+
+Optional: `priority` (1–4, default 2), `status`, `category`, `reference_number`,
+`tags`.
+
+⚠️ **`category` is a slug, and an unknown one is a hard error naming the
+slug** — it does not silently file the ticket uncategorised. Read one off
+`category.slug` on a `list_tickets` row, or take any non-`_uncategorised` `key`
+from `get_escalation_report`.
 
 ⚠️ **Opening a ticket already at `status=4` emails the customer the satisfaction
 survey**, on creation. Leave `status` alone unless the user asked for something
 specific.
+
+You cannot set the assignee — a created ticket is always assigned to the
+token's own account, since this API only ever shows you tickets assigned to
+you.
 
 Confirm subject, description and requester with the user before calling it.
 There is no delete-ticket tool — a mistake needs a human in the web UI.
