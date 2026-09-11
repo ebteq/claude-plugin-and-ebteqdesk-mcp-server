@@ -120,8 +120,46 @@ Installing the wrong one gets you two HTTP stacks in one environment.
 
 `ebteqdesk-mcp` itself is versioned with semver, and the version means
 something: **the major moves when a tool's observable contract does.** This is
-`4.2.0`; `serverInfo.version` in the MCP handshake reports the same string, so a
+`4.3.0`; `serverInfo.version` in the MCP handshake reports the same string, so a
 host can tell a renamed tool argument from an outage.
+
+**4.3.0 adds two knowledge bases and moves nothing an existing caller wrote.**
+Ebteqdesk now hosts Salon V3 (`salonv3`, the pre-existing one) and Warni
+(`warni`); a category carries which one it belongs to, and folders and
+articles inherit it through their category. `list_kb_tree`,
+`search_kb_articles`, `get_kb_article`, `list_kb_proposals`,
+`list_kb_categories`, `list_kb_folders` and `create_kb_category` each gain one
+new optional argument, `portal`, defaulting to `"salonv3"` when omitted — the
+same behaviour every caller written before Warni existed already got.
+`propose_kb_article`, `update_kb_article` and the folder writes are untouched:
+`kb_folder_id` already carries the portal, so a second, conflicting `portal`
+argument there would be a regression. The tool count stays at forty-two — no
+tool was added or removed.
+
+🔴 **Still a minor, for a genuinely new failure mode.** An Ebteqdesk install
+that predates portal-aware `GET /api/v1/kb/*` filtering silently drops a
+`?portal=` query parameter it does not recognise and answers with its old,
+unfiltered tree — so `list_kb_tree` (and the two projections that call it)
+now raises `StalePortalApiError` when a `portal` was requested and the
+response carries no `portal` key at all, rather than handing back a result
+that looks filtered and is not. That is a new, caller-observable behaviour
+reachable only by passing `portal`, which is why this is `4.3.0` and not a
+patch release, even though nothing already-working moved.
+
+⚠️ **Also fixed here, not a new argument:** `list_kb_folders` used to drop
+each folder's `portal` on the floor when it flattened folders out of their
+categories. Folders now carry `portal`, copied down from their category — a
+bug fix restoring information the shape always implied, not a behaviour
+change a caller could have depended on the absence of.
+
+🔴 **`reorder_kb_children` on `scope="categories"` inherits a breaking change
+already live on the server it talks to.** `PUT /api/v1/kb/categories/order`
+now 422s on `errors.ids` when the posted set spans both portals, where before
+it required every category in the installation. This package's own dispatch
+and arguments do not move, but a caller following the tool's own "post the
+whole set" instruction now has to post one portal's whole set, not the
+installation's — the entry most likely to explain a support ticket that reads
+"reordering categories used to work and now 422s".
 
 **4.2.0 adds nine tools — agent provisioning — and moves nothing else.** Every
 tool that existed at 4.1.0 keeps the same name, arguments, defaults and return
@@ -450,7 +488,7 @@ shown once.
 | `ticket:write` | `create_ticket`, `comment_on_ticket`, `add_private_note`, `set_ticket_status`, `close_ticket` | **write** |
 | `escalation:write` | `escalate_ticket`, `de_escalate_ticket`, and `add_private_note` **on an escalated ticket** — internal only | **write** |
 | `escalation:reply` | `comment_on_ticket` **on an escalated ticket**, and `close_ticket` **with a `body` on one** — **emails the requester's address** | **write** |
-| `kb:write` | `propose_kb_article`, `update_kb_article`, `create_kb_category`, `update_kb_category`, `create_kb_folder`, `update_kb_folder`, and the three reads `get_kb_article_review`, `list_kb_proposals` and `list_kb_tree` | **write** |
+| `kb:write` | `propose_kb_article`, `update_kb_article`, `create_kb_category`, `update_kb_category`, `delete_kb_category`, `create_kb_folder`, `update_kb_folder`, `delete_kb_folder`, `reorder_kb_children`, `upload_kb_media`, and the five reads `get_kb_article_review`, `list_kb_proposals`, `list_kb_tree`, `list_kb_categories` and `list_kb_folders` | **write** |
 | `admin:read` | `list_agents`, `get_agent`, `list_roles`, `list_groups`, `list_api_keys` — the account roster. **Also needs the `admin.access` ability**, i.e. an Administrator-role account. 🔴 **Never covered by a legacy `*` key** | read |
 | `admin:write` | `create_agent`, `update_agent`, `issue_api_key`, `revoke_api_key` — creates accounts and hands out credentials. **Also needs `admin.access`**. 🔴 **Never covered by a legacy `*` key** | **write** |
 
@@ -935,8 +973,8 @@ a page size you got. `links.next` carries `per_page` forward.
 | `set_ticket_status` | `PUT /api/v1/tickets/{id}/status` | `ticket:write` | `ticket.reply`, **+ `ticket.close` when the ticket is currently resolved** | Moves it between working states (1/2/3/8). **Emails nobody, notifies nobody** |
 | `close_ticket` | `POST /api/v1/tickets/{id}/close` | `ticket:write` **+ `escalation:reply` if a `body` is sent on an escalated ticket** | `ticket.close` | Resolves the ticket. **Emails a rating survey only if asked for `status: 4`** |
 | `propose_kb_article` | `POST /api/v1/kb/articles` | `kb:write` | `kb.manage` | Files a **draft** into a human's review queue |
-| `update_kb_article` | `PATCH /api/v1/kb/articles/{ref}` | `kb:write` | `kb.manage` | Rewrites a draft and **re-queues it for review** |
-| `create_kb_category` | `POST /api/v1/kb/categories` | `kb:write` | `kb.manage` | Creates a real KB category |
+| `update_kb_article` | `PATCH /api/v1/kb/articles/{ref}` | `kb:write` | `kb.manage` | On a **draft**, rewrites it and **re-queues it for review** (200). On a **published** article, **stages a pending revision instead and leaves the live article untouched** (202, `revision` key) — never a 409 |
+| `create_kb_category` | `POST /api/v1/kb/categories` | `kb:write` | `kb.manage` | Creates a real KB category in one knowledge base (`portal`, defaulting to `salonv3`); **write-once**, no move afterwards |
 | `update_kb_category` | `PATCH /api/v1/kb/categories/{id}` | `kb:write` | `kb.manage` | Renames it — **re-deriving its slug and changing its portal URL** |
 | `delete_kb_category` | `DELETE /api/v1/kb/categories/{id}` | `kb:write` | `kb.manage` | 🔴 **Destroys the category. No undo.** Refused while it holds folders |
 | `create_kb_folder` | `POST /api/v1/kb/folders` | `kb:write` | `kb.manage` | Creates a folder, always **`agents` (internal)** |
@@ -2174,7 +2212,7 @@ That is so `--help` cannot leave you staring at a process that is really just
 blocked reading a TTY.
 
 ```bash
-ebteqdesk-mcp --version     # -> ebteqdesk-mcp 4.2.0, on stderr
+ebteqdesk-mcp --version     # -> ebteqdesk-mcp 4.3.0, on stderr
 ```
 
 ⚠️ **If the command is not found, or the version comes back below 3.0.0, you
