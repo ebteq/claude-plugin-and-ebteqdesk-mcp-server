@@ -5,17 +5,31 @@ description: Work the Ebteqdesk business-partner escalation queue — see every 
 
 # Ebteqdesk escalations
 
-Verified against `ebteqdesk-mcp` 1.6.0 (32 tools).
+Verified against `ebteqdesk-mcp` 4.3.0 (42 tools).
 
 The escalation queue is the shared, install-wide view of what has gone wrong.
 Acting on it notifies real people.
 
 Call `whoami` first to learn which account you are and which scopes the key
-resolves to. A `403` here almost always means the key lacks `escalation:read`
-(for the queue) or `escalation:write` (to write into an escalated ticket);
-scopes are fixed at key creation, so the fix is a new key. A `403` naming
-`escalation:write` from `comment_on_ticket` also *tells you the ticket is
-escalated* — that is the only way that endpoint can ask for that scope.
+resolves to. A `403` on `list_escalations` or a write into an escalated ticket
+can come from **two independent gates**, and they need different fixes:
+
+- the **scope** — `escalation:read` (for the queue) or `escalation:write` (to
+  write into an escalated ticket) — missing from `apiKey.requested` or
+  `apiKey.scopes`. **A new key fixes this.**
+- the **role ability** behind it — `list_escalations` needs
+  `bp_escalation.view` on top of the `escalation:read` scope, and **both**
+  `comment_on_ticket` and `add_private_note` need `bp_escalation.reply` on top
+  of `escalation:write` when the ticket is escalated. Both are role
+  permissions, so they show up in `whoami`'s `permissions` list, **not** in
+  `apiKey.scopes` — check there. 🔴 **If the ability is missing, a new key
+  changes nothing.** An ordinary support account typically has neither the
+  scope nor the ability, so do not assume re-minting the same key with the box
+  ticked will fix a refusal here; it fixes the scope half only.
+
+A `403` naming `escalation:write`, `escalation:read` or `bp_escalation.reply`
+from `comment_on_ticket` also *tells you the ticket is escalated* — that is
+the only way that endpoint can ask for any of those.
 
 ## The order things happen in
 
@@ -49,8 +63,8 @@ that only move **state** do not:
 
 | Tool | Ordinary ticket | Escalated ticket |
 |---|---|---|
-| `comment_on_ticket` | `ticket:write` + `ticket.reply` | `ticket:write` **+ `escalation:write`** |
-| `add_private_note` | `ticket:write` + `ticket.reply` | `ticket:write` **+ `escalation:write`** (and the `bp_escalation.reply` ability) |
+| `comment_on_ticket` | `ticket:write` + `ticket.reply` | **`escalation:write` + `escalation:read`** (and the `bp_escalation.reply` ability) |
+| `add_private_note` | `ticket:write` + `ticket.reply` | **`escalation:write` + `escalation:read`** (and the `bp_escalation.reply` ability) |
 | `close_ticket` | `ticket:write` + `ticket.close` | **identical — no escalation branch at all** |
 | `set_ticket_status` | `ticket:write` + `ticket.reply` | **identical — no escalation branch at all** |
 
@@ -150,11 +164,17 @@ paraphrase or allude to a note in anything the customer will see.**
 ### Attachments
 
 When the answer depends on what is in a screenshot, call
-`get_ticket_attachment(attachment_id)` and actually look at it. Ids come from
-`get_ticket`: `data.attachments[].id` for the opening message's files, or
-`data.conversation[].attachments[].id` for a reply's or a note's. It returns
-the image itself, downscaled — so say so rather than guessing if you cannot
-read fine detail. Video attachments answer 415 and are never returned.
+`get_ticket_attachment(attachment_id, max_dimension)` and actually look at it.
+Ids come from `get_ticket`: `data.attachments[].id` for the opening message's
+files, or `data.conversation[].attachments[].id` for a reply's or a note's. It
+returns the image itself, **downscaled to 1568px on the longest edge by
+default** — so say so rather than guessing if you cannot read fine detail, and
+raise `max_dimension` (1..4096) and retry rather than reporting a serial
+number or an error code you are not sure you read correctly. Read the
+`downscaled` flag it reports rather than comparing byte sizes — a shrunk,
+re-encoded screenshot can come back as a *larger* file, so file size is not
+evidence of fidelity. Video attachments answer 415 and are never returned;
+check `mime_type` first if you want to skip the round trip.
 
 ## Reading an escalated ticket
 
@@ -173,15 +193,29 @@ a note into a public reply — only you do.
 ## Replying on an escalated ticket
 
 `comment_on_ticket(ticket_id, body)` posts a **public** reply that the customer
-receives **by email**. It cannot be edited or deleted afterwards.
+receives **by email**. It cannot be edited or deleted afterwards, and it only
+reaches a ticket **assigned to your own account** — a shared-queue ticket
+assigned to somebody else refuses this with a 403 whose reason is
+`ticket_not_assigned`, which is not a scope problem and not fixed by any key.
+Use `add_private_note` to record a finding on somebody else's escalation
+instead.
 
-⚠️ **On an escalated ticket this needs both `ticket:write` and
-`escalation:write`.** A key with only `ticket:write` replies fine to ordinary
+⚠️ **On an escalated ticket this needs `escalation:write` AND
+`escalation:read`, plus the `bp_escalation.reply` role ability — not
+`ticket:write`.** A key with only `ticket:write` replies fine to ordinary
 tickets and gets a 403 here — that is the scope combination, not a broken tool.
+
+🔴 **`comment.id` in the response can be `null`, and that means nothing was
+posted.** Ebteqdesk silently discards a reply whose text is identical to the
+author's saved signature — the call still answers 201 and the ticket is still
+touched, but no comment row exists and the customer received nothing. Check
+`comment.id` before telling the user their reply went out.
 
 `add_private_note(ticket_id, body)` is the internal alternative and notifies no
 customer. On an escalated ticket it is usually what you want: record the finding
 for the team rather than narrating progress to an already-unhappy customer.
+🔴 The same null-`comment.id` trap applies here too, for a note whose body is
+empty in substance — check it the same way.
 
 ⚠️ **A note on an escalated ticket needs the same two scopes** — plus the
 `bp_escalation.reply` ability. Not because the note would be exposed; it would
@@ -192,6 +226,13 @@ assigned to somebody else, which additionally needs `escalation:read`. Use that
 to record a finding on a ticket you are reviewing — not to leave notes on other
 people's tickets they did not ask for.
 
+⚠️ **An escalated ticket you cannot reach answers 404 here, not a scope
+refusal.** If your key cannot resolve `escalation:read`, a real escalated
+ticket outside your own queue comes back with the same "no ticket with that
+id" body as an id that does not exist. Do not read that 404 as proof the
+ticket does not exist, and do not use this tool to probe whether an id is
+escalated — read `escalated` off a ticket a list tool actually gave you.
+
 Draft, show the user, then send.
 
 ## Escalating
@@ -200,6 +241,12 @@ Draft, show the user, then send.
 escalation time, writes an "Escalated" history entry, and **sends the
 `TicketEscalated` notification to every Assistant on the installation. People
 get pinged.**
+
+🔴 **This only works on a ticket ASSIGNED TO YOU.** Unlike `de_escalate_ticket`
+(below), there is no "escalate somebody else's ticket for them" path — the
+account escalating is the one who was working it. If the user wants a ticket
+they do not own escalated, the assignee (or an administrator) has to be the
+one to call this, or to do it in the Ebteqdesk web UI.
 
 🔴 **Never retry this call blind.** The stored state is idempotent — a second
 escalation keeps the original timestamp — but **the notification is not**. A
@@ -216,6 +263,13 @@ attention, not a status flag.
 escalation and its timestamp, and writes a "De-Escalated" history entry. It
 sends **no** notification, so a repeat call is cheaper than a repeat escalation.
 
+🔴 **This reaches tickets `escalate_ticket` cannot: any escalated ticket you
+can read, including one assigned to somebody else.** The two directions are
+deliberately asymmetric — escalating creates work for other people and is
+gated on being the one doing that work; de-escalating closes out work that may
+be anyone's on the shared queue, and needs the `bp_escalation.reply` ability
+(not `ticket.reply`, which is what escalating costs) rather than ownership.
+
 ⚠️ But **the escalation timestamp is gone once this succeeds**, and re-escalating
 afterwards restarts the clock from now. Anything measuring how long the ticket
 sat escalated loses that history. Do not de-escalate to "reset" a ticket.
@@ -231,6 +285,14 @@ sat escalated loses that history. Do not de-escalate to "reset" a ticket.
 Default to 5. On a ticket that was escalated — where the customer has already
 had a bad experience — sending an unrequested satisfaction survey is a decision
 the user should make explicitly, not one you make for them.
+
+⚠️ **Whether `status=4` actually sends mail is an installation setting you
+cannot see.** An install may set `EBTEQDESK_RATING_EMAIL_ENABLED=false` to
+suppress the survey server-side, but the code default is ON, nothing in this
+API's responses reports which way it is set, and this client has no way to
+read it. Treat `status=4` as sending mail unless a human tells you otherwise
+for this install, and never report "the survey is disabled here" as a fact you
+established yourself.
 
 Neither value needs `escalation:write`; `close_ticket` has no escalation branch.
 And it takes **no message argument** — reply first, then close.

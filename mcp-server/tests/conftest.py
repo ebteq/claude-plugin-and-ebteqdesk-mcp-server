@@ -583,6 +583,10 @@ def kb_category_row(
 
     `folders` is ALWAYS present and is `[]` for a category with none — the
     server never omits the key, so a client has no branch and neither does this.
+
+    `portal` defaults to `"salonv3"`, matching what an omitted `portal` query
+    param resolves to server-side — this fixture is the DEFAULT tree a caller
+    who never heard of Warni still gets.
     """
     category = {
         "id": 3,
@@ -590,6 +594,7 @@ def kb_category_row(
         "slug": "pos",
         "description": None,
         "position": 0,
+        "portal": "salonv3",
         "folders": folders if folders is not None else [kb_folder_row()],
     }
     category.update(overrides)
@@ -692,7 +697,7 @@ def staged_revision(**revision: Any):
             "status": "published",
             "source": "manual",
             "published_at": "2026-08-13T09:14:22+00:00",
-            "url": "https://ebteqdesk.test/support/kb/articles/resetting-your-password",
+            "url": "https://ebteqdesk.test/support/salonv3-kb/articles/resetting-your-password",
         }
     )
 

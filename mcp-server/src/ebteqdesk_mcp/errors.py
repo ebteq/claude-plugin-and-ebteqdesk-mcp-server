@@ -18,6 +18,8 @@ Hierarchy:
     +- LocalFileError            a LOCAL path could not be read; no request was made
     +- TransportError            host unreachable, DNS failure, TLS error, timeout
     +- MalformedResponseError    a reply that is not the JSON this API promises
+    +- StalePortalApiError       a `portal`-filtered read came back from an
+    |                            install that predates KB portal support
     +- ApiError                  the server answered, with an error status
        +- AuthenticationError    401  token missing/expired/revoked
        +- ScopeError             403  a scope did not resolve (carries required_scope)
@@ -106,6 +108,7 @@ __all__ = [
     "LocalFileError",
     "TransportError",
     "MalformedResponseError",
+    "StalePortalApiError",
     "ApiError",
     "AuthenticationError",
     "ScopeError",
@@ -273,6 +276,59 @@ class MalformedResponseError(EbteqdeskError):
             f"{content_type or 'no content type'} instead of JSON. This usually "
             f"means a proxy or error page answered instead of the application. "
             f"First bytes: {body_snippet!r}"
+        )
+
+
+class StalePortalApiError(EbteqdeskError):
+    """A `portal`-filtered read got a 200, but the shape says the install does
+    not understand `portal` at all — so the rows above are NOT what was asked
+    for, and handing them back would be a silent wrong answer.
+
+    🔴 WHY THIS EXISTS AT ALL: Laravel ignores a query parameter no route
+    declares, rather than rejecting it. Against an Ebteqdesk install that
+    predates two-knowledge-base (Salon V3 / Warni) support, `GET
+    /api/v1/kb/tree?portal=warni` answers 200 with the SAME unfiltered tree it
+    always gave — both knowledge bases interleaved — and nothing about the
+    status code or the envelope says so. A caller that only checked for an
+    error would believe it got Warni-only categories and hand them to a human
+    as if they were. Refusing here, once, is cheaper than that.
+
+    🔴 THE SIGNAL IS `kb_tree`'s OWN SHAPE, NOT A SEPARATE PROBE. An upgraded
+    install's `GET /api/v1/kb/tree` puts a `portal` key on every category row;
+    an install that has not shipped the change yet has never heard of that
+    key and cannot put it there. So `list_kb_tree` looks at the categories
+    it already fetched — no second request — and raises this the moment
+    `portal` was asked for but at least one category came back without a
+    `portal` key of its own. `search_kb_articles`, `get_kb_article` and
+    `list_kb_proposals` do NOT get this check: their rows nest a
+    `{slug, name}` category pair that has never carried `portal`, upgraded
+    install or not, so its absence there proves nothing and checking it would
+    misfire on every call. Verify an install with `list_kb_tree(portal=...)`
+    before trusting a `portal` argument on those three.
+
+    The fix is entirely server-side — there is nothing this client can do
+    except stop pretending the filter worked. Ask an administrator to deploy
+    the Ebteqdesk release that adds `kb_categories.portal` and portal-aware
+    `GET /api/v1/kb/*` filtering. Omitting `portal` is unaffected: it already
+    reproduces this install's only behaviour today, so it never raises this.
+    """
+
+    def __init__(self, portal: str) -> None:
+        self.portal = portal
+
+        super().__init__(
+            f"Asked Ebteqdesk to filter its knowledge base tree by "
+            f"portal={portal!r}, but the categories it returned carry no "
+            f"`portal` key at all. This Ebteqdesk install predates "
+            f"two-knowledge-base (Salon V3 / Warni) support and SILENTLY "
+            f"IGNORED the filter rather than rejecting it — Laravel drops an "
+            f"unknown query parameter instead of erroring on it — so the tree "
+            f"just returned is BOTH knowledge bases interleaved, not only "
+            f"{portal!r}'s. Nothing on this client can filter it after the "
+            f"fact: ask an administrator to deploy the Ebteqdesk release that "
+            f"adds `kb_categories.portal` and portal-aware "
+            f"`GET /api/v1/kb/*` filtering, then retry. Omitting `portal` is "
+            f"unaffected by this and safe to use against this install today."
         )
 
 

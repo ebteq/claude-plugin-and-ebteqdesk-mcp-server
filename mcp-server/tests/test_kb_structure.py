@@ -66,7 +66,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from ebteqdesk_mcp import server as srv
 from ebteqdesk_mcp.client import EbteqdeskClient
 from ebteqdesk_mcp.config import Config
-from ebteqdesk_mcp.errors import InvalidRequestError, NotFoundError
+from ebteqdesk_mcp.errors import InvalidRequestError, NotFoundError, StalePortalApiError
 
 #: The seven tools this file is about, and what a minimal valid call looks like.
 #:
@@ -211,6 +211,174 @@ async def test_a_category_with_no_folders_still_carries_the_key(make_client) -> 
 
 
 # --------------------------------------------------------------------------- #
+# Two knowledge bases: `portal` on `list_kb_tree`, and the un-upgraded-API guard
+# --------------------------------------------------------------------------- #
+
+
+async def test_omitting_portal_sends_no_query_parameter(make_client) -> None:
+    """🔴 ABSENT MEANS `"salonv3"` SERVER-SIDE, NOT `"all"` — and this client
+    reproduces that by sending nothing at all, exactly as it did before Warni
+    existed. A client that filled in `portal=salonv3` would depend on knowing
+    the server's default rather than just not asking."""
+    client, recorder = make_client(always_json(200, kb_tree_payload()))
+
+    await client.list_kb_tree()
+
+    assert recorder.last.url.params == httpx2.QueryParams()
+
+
+@pytest.mark.parametrize("portal", ["salonv3", "warni", "all"])
+async def test_each_legal_portal_is_sent_verbatim(make_client, portal: str) -> None:
+    client, recorder = make_client(
+        always_json(200, kb_tree_payload([kb_category_row(portal=portal)]))
+    )
+
+    await client.list_kb_tree(portal=portal)
+
+    assert dict(recorder.last.url.params) == {"portal": portal}
+
+
+async def test_an_unrecognised_portal_is_rejected_before_it_is_sent(wired) -> None:
+    """🔴 `Literal` CATCHES THE TYPO BEFORE THIS TOOL BODY EVER RUNS. The schema
+    enumerates exactly the three legal values, so an MCP client validates a
+    call against it before sending one — no wasted round trip and no server
+    422 to translate."""
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(200, json=kb_tree_payload())
+
+    wired(handler)
+
+    with pytest.raises(ToolError):
+        await srv.mcp.call_tool("list_kb_tree", {"portal": "salonv2"})
+
+    assert seen == []
+
+
+async def test_the_tool_threads_portal_through(wired) -> None:
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(
+            200, json=kb_tree_payload([kb_category_row(portal="warni")])
+        )
+
+    wired(handler)
+
+    await srv.mcp.call_tool("list_kb_tree", {"portal": "warni"})
+
+    assert dict(seen[-1].url.params) == {"portal": "warni"}
+
+
+async def test_portal_all_interleaves_categories_from_both_knowledge_bases(
+    make_client,
+) -> None:
+    """`position` is dense PER PORTAL, so both commonly have a category at `0` —
+    asserted here as an ORDER, not just a union, because a client that assumed
+    contiguity would silently misgroup the two knowledge bases."""
+    client, _ = make_client(
+        always_json(
+            200,
+            kb_tree_payload(
+                [
+                    kb_category_row(id=3, portal="salonv3", position=0),
+                    kb_category_row(id=9, portal="warni", position=0, folders=[]),
+                    kb_category_row(id=4, portal="salonv3", position=1, folders=[]),
+                ]
+            ),
+        )
+    )
+
+    tree = await client.list_kb_tree(portal="all")
+
+    assert [c["portal"] for c in tree["data"]] == ["salonv3", "warni", "salonv3"]
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 The un-upgraded-API guard: `StalePortalApiError`
+# --------------------------------------------------------------------------- #
+#
+# The danger this guards against: Laravel silently ignores a query parameter no
+# route declares, so `?portal=warni` against an install that predates
+# two-knowledge-base support answers 200 with the SAME unfiltered tree it always
+# gave. The only local signal available is the response's own shape — an
+# upgraded install puts `portal` on every category; one that has not shipped
+# the change has never heard of that key. `list_kb_tree` checks exactly that,
+# and only when `portal` was actually asked for.
+
+
+async def test_a_stale_api_that_ignored_the_filter_raises_instead_of_returning_rows(
+    make_client,
+) -> None:
+    """🔴 DEMONSTRATING THE GUARD FIRING: categories with no `portal` key at all
+    — the shape an install predating two-knowledge-base support answers with —
+    must not be handed back silently as if they were `portal`-filtered."""
+    stale_category = {
+        key: value for key, value in kb_category_row().items() if key != "portal"
+    }
+    client, _ = make_client(always_json(200, kb_tree_payload([stale_category])))
+
+    with pytest.raises(StalePortalApiError) as excinfo:
+        await client.list_kb_tree(portal="warni")
+
+    assert "warni" in str(excinfo.value)
+    assert "predates two-knowledge-base" in str(excinfo.value)
+    assert "portal" in str(excinfo.value)
+
+
+async def test_the_same_stale_response_is_fine_when_portal_was_never_asked_for(
+    make_client,
+) -> None:
+    """The guard is conditional on the CALLER having asked for a filter — an
+    install this old is exactly what every caller written before Warni existed
+    already expects, and must keep working unmodified."""
+    stale_category = {
+        key: value for key, value in kb_category_row().items() if key != "portal"
+    }
+    client, _ = make_client(always_json(200, kb_tree_payload([stale_category])))
+
+    tree = await client.list_kb_tree()
+
+    assert tree["data"][0]["id"] == stale_category["id"]
+
+
+async def test_an_upgraded_api_with_the_same_portal_requested_does_not_raise(
+    make_client,
+) -> None:
+    """The other half of the same behaviour: once every category carries
+    `portal`, asking for one raises nothing and returns the rows."""
+    client, _ = make_client(
+        always_json(200, kb_tree_payload([kb_category_row(portal="warni")]))
+    )
+
+    tree = await client.list_kb_tree(portal="warni")
+
+    assert tree["data"][0]["portal"] == "warni"
+
+
+async def test_an_empty_tree_does_not_falsely_trigger_the_guard(make_client) -> None:
+    """No categories means no shape to check — an empty KB is not evidence of a
+    stale install, and the guard must not invent a signal that is not there."""
+    client, _ = make_client(always_json(200, kb_tree_payload([])))
+
+    assert (await client.list_kb_tree(portal="warni"))["data"] == []
+
+
+async def test_the_guard_only_lives_on_list_kb_tree() -> None:
+    """🔴 NOT `search_kb_articles`, `get_kb_article` OR `list_kb_proposals`.
+    Their rows nest a `{slug, name}` category pair that has never carried
+    `portal`, upgraded install or not — checking for its absence there would
+    misfire on every call, upgraded or not, so those three do not attempt it.
+    The docstrings say so, pointing back at this tool as the way to check."""
+    for name in ("search_kb_articles", "get_kb_article", "list_kb_proposals"):
+        doc = " ".join((getattr(EbteqdeskClient, name).__doc__ or "").split())
+        assert "list_kb_tree(portal=" in doc, name
+
+
+# --------------------------------------------------------------------------- #
 # The four writes — the wire
 # --------------------------------------------------------------------------- #
 
@@ -225,6 +393,32 @@ async def test_create_category_posts_the_documented_body(make_client) -> None:
     assert recorder.last.method == "POST"
     assert recorder.last.url.path == "/api/v1/kb/categories"
     assert sent(recorder) == {"name": "POS", "description": "Tills and terminals"}
+
+
+async def test_create_category_omits_portal_when_none(make_client) -> None:
+    """🔴 ABSENT, NOT `null`. The server's own default for a missing key IS
+    `"salonv3"`, so sending `"portal": null` would depend on that default
+    matching rather than just relying on the key never being asked about."""
+    client, recorder = make_client(
+        always_json(201, {"data": kb_category_row(folders=[])})
+    )
+
+    await client.create_kb_category(name="POS")
+
+    assert "portal" not in sent(recorder)
+
+
+@pytest.mark.parametrize("portal", ["salonv3", "warni"])
+async def test_create_category_sends_portal_when_given(
+    make_client, portal: str
+) -> None:
+    client, recorder = make_client(
+        always_json(201, {"data": kb_category_row(folders=[], portal=portal)})
+    )
+
+    await client.create_kb_category(name="POS", portal=portal)
+
+    assert sent(recorder)["portal"] == portal
 
 
 async def test_create_folder_posts_the_api_field_name(make_client) -> None:
@@ -701,6 +895,57 @@ async def test_the_structure_write_tools_round_trip_through_mcp(wired) -> None:
         assert result.structured_content["data"]["id"] == 7
 
 
+async def test_list_kb_folders_copies_the_portal_down_from_the_category(
+    wired,
+) -> None:
+    """🔴 THE ONE REAL DATA-LOSS BUG THIS FEATURE FIXES. `GET /api/v1/kb/tree`
+    puts `portal` on the CATEGORY, never on a folder row — flattening folders
+    out of their categories, as `list_kb_folders` does, would otherwise make
+    the portal unrecoverable, on the exact tool this server's own docs
+    recommend as the shortcut for picking a destination folder."""
+    wired(
+        always_json(
+            200,
+            kb_tree_payload(
+                [
+                    kb_category_row(
+                        id=3,
+                        portal="warni",
+                        folders=[kb_folder_row(id=7, kb_category_id=3)],
+                    ),
+                    kb_category_row(
+                        id=4,
+                        portal="salonv3",
+                        folders=[kb_folder_row(id=8, kb_category_id=4, slug="setup")],
+                    ),
+                ]
+            ),
+        )
+    )
+
+    result = await srv.mcp.call_tool("list_kb_folders", {})
+
+    folders = {row["id"]: row["portal"] for row in result.structured_content["data"]}
+    assert folders == {7: "warni", 8: "salonv3"}
+
+
+async def test_list_kb_folders_carries_the_portal_through_the_category_filter(
+    wired,
+) -> None:
+    wired(
+        always_json(
+            200,
+            kb_tree_payload(
+                [kb_category_row(id=3, portal="warni")],
+            ),
+        )
+    )
+
+    result = await srv.mcp.call_tool("list_kb_folders", {"kb_category_id": 3})
+
+    assert result.structured_content["data"][0]["portal"] == "warni"
+
+
 async def test_no_structure_tool_is_reachable_without_kb_write(wired) -> None:
     """Including the TREE, which only reads: it is the authoring structure, so it
     is gated on `kb:write` like `get_kb_article_review`. A `kb:read` key that can
@@ -834,8 +1079,10 @@ async def test_the_structure_tools_expose_exactly_their_documented_arguments(
     def required(name: str) -> set:
         return set(tools[name].input_schema.get("required", []))
 
-    assert set(schema(tools["list_kb_tree"])) == set()
-    assert set(schema(tools["create_kb_category"])) == {"name", "description"}
+    assert set(schema(tools["list_kb_tree"])) == {"portal"}
+    assert set(schema(tools["create_kb_category"])) == {
+        "name", "description", "portal",
+    }
     assert set(schema(tools["update_kb_category"])) == {
         "category_id", "name", "description",
     }
@@ -857,6 +1104,23 @@ async def test_the_structure_tools_expose_exactly_their_documented_arguments(
     # re-scope, so anything else appearing here is a widened surface.
     assert required("delete_kb_category") == {"category_id"}
     assert required("delete_kb_folder") == {"folder_id"}
+
+
+async def test_the_portal_enums_differ_between_reads_and_creation(tools) -> None:
+    """🔴 `list_kb_tree` OFFERS `"all"`; `create_kb_category` REFUSES IT. A
+    category must belong to exactly one knowledge base to be created, so the
+    schema — not just the docstring — must not offer a caller a value the
+    server 422s on."""
+    tree_portal = str(schema(tools["list_kb_tree"])["portal"])
+    create_portal = str(schema(tools["create_kb_category"])["portal"])
+
+    for value in ("salonv3", "warni", "all"):
+        assert value in tree_portal
+
+    for value in ("salonv3", "warni"):
+        assert value in create_portal
+
+    assert "all" not in create_portal
 
 
 @pytest.mark.parametrize("name", sorted(STRUCTURE_TOOLS))
@@ -1044,15 +1308,26 @@ async def test_the_create_tools_explain_the_derived_slug_collision(
     assert "COLLIDE" in description, name
 
 
-async def test_the_two_slug_scopes_are_stated_and_not_confused(tools) -> None:
-    """Category slugs are GLOBAL; folder slugs are unique only WITHIN their
-    category. Getting it the wrong way round makes a caller rename a folder that
-    did not need renaming, or expect a clash that never comes."""
+async def test_the_three_slug_scopes_are_stated_and_not_confused(tools) -> None:
+    """🔴 THREE SLUG SCOPES, NOT TWO, since two-knowledge-base support: category
+    slugs are unique PER PORTAL, folder slugs are unique only WITHIN their
+    category, and article slugs are unique GLOBALLY across both portals.
+
+    This test used to assert the category scope was GLOBAL — true before
+    Ebteqdesk grew a second knowledge base, and false the moment `portal`
+    became a column on `kb_categories`. That assertion enforced the falsehood
+    rather than catching it, which is why it moved here rather than being
+    quietly widened in place. Getting any pair of these the wrong way round
+    makes a caller rename a category that did not need renaming, or expect a
+    clash that never comes."""
     category = described(tools["create_kb_category"])
     folder = described(tools["create_kb_folder"])
 
-    assert "unique GLOBALLY" in category
-    assert "ONLY WITHIN THEIR CATEGORY" in folder
+    assert "unique PER PORTAL" in category
+    assert "unique PER PORTAL" in folder
+    assert "unique ONLY WITHIN THEIR CATEGORY" in folder
+    assert "unique globally" in category
+    assert "unique GLOBALLY" in folder
     assert '"FAQ" under Billing and "FAQ" under Account are both fine' in folder
 
 
@@ -1146,6 +1421,17 @@ async def test_the_server_instructions_carry_the_new_surface(tools) -> None:
 
     for name in STRUCTURE_TOOLS:
         assert f"`{name}`" in instructions, name
+
+
+async def test_the_server_instructions_state_the_two_portal_choice(tools) -> None:
+    """🔴 THE INSTRUCTIONS BLOCK IS READ BEFORE ANY TOOL DESCRIPTION, so the
+    permanence of a folder choice — which is also a portal choice — belongs
+    there and not only on `propose_kb_article`'s own docstring."""
+    instructions = " ".join((srv.mcp.instructions or "").split())
+
+    assert "TWO SEPARATE PORTALS, SALON V3 AND WARNI" in instructions
+    assert "PICKING A" in instructions and "PICKS A PORTAL" in instructions
+    assert "permanently" in instructions.lower()
 
 
 async def test_exactly_two_tools_delete_anything_and_neither_touches_an_article(

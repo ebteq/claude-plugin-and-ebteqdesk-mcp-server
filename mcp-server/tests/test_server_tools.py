@@ -243,13 +243,15 @@ async def test_argument_schemas(tools) -> None:
     }
     assert set(props("list_escalations")) == {"page", "per_page"}
     assert set(props("get_escalation_report")) == {"date_from", "date_to"}
-    assert set(props("search_kb_articles")) == {"query", "per_page", "page"}
+    assert set(props("search_kb_articles")) == {
+        "query", "per_page", "page", "portal",
+    }
     # 🔴 `locale` IS OPTIONAL AND ITS ABSENCE IS NOT `en`. Omitted reads the
     # LOCALE-FREE corpus, which deliberately includes articles that exist in only
     # one language and hands back their BASE text for them; given, it reads what
     # a reader of that language actually sees. Two different questions, and
     # making either the default for the other would break the one it is not.
-    assert set(props("get_kb_article")) == {"slug", "locale"}
+    assert set(props("get_kb_article")) == {"slug", "locale", "portal"}
 
     assert set(props("create_ticket")) == {
         "subject", "description", "requester", "priority", "status",
@@ -276,8 +278,8 @@ async def test_argument_schemas(tools) -> None:
     ]
 
     # The two flat projections over `list_kb_tree`.
-    assert props("list_kb_categories") == {}
-    assert set(props("list_kb_folders")) == {"kb_category_id"}
+    assert set(props("list_kb_categories")) == {"portal"}
+    assert set(props("list_kb_folders")) == {"kb_category_id", "portal"}
 
     # 🔴 A LOCAL PATH AND NOTHING ELSE. No `content`, no `base64`, no `data` —
     # routing a screenshot through the model's context as base64 costs roughly
@@ -1357,6 +1359,60 @@ async def test_the_advertised_enum_matches_what_the_annotation_enforces(
     # the safe value leads, so nobody reads past it — and the annotation has no
     # opinion about presentation.
     assert advertised == set(_literal_values(tool, argument))
+
+
+def _enum_values(schema: dict) -> set:
+    """The values a nullable `Literal` schema advertises, out of its `anyOf`
+    branches — one carrying the `enum`, the other just `{"type": "null"}`."""
+    return {
+        value
+        for branch in schema["anyOf"]
+        if "enum" in branch
+        for value in branch["enum"]
+    }
+
+
+@pytest.mark.parametrize(
+    "tool",
+    ["list_kb_tree", "search_kb_articles", "get_kb_article", "list_kb_proposals"],
+)
+async def test_the_portal_enum_matches_what_the_annotation_enforces(
+    tools, tool: str
+) -> None:
+    """The same drift guard as the numeric enums above, for the closed
+    vocabulary shared by the four `portal`-taking reads. All four offer
+    `"all"`, unlike `create_kb_category`'s — see the test below."""
+    schema = tools[tool].input_schema["properties"]["portal"]
+    advertised = _enum_values(schema)
+
+    assert advertised == set(_literal_values(tool, "portal"))
+    assert advertised == {"salonv3", "warni", "all"}
+
+
+async def test_create_kb_categorys_portal_enum_excludes_all(tools) -> None:
+    """🔴 THE ONE PORTAL ENUM THAT DIFFERS FROM THE OTHER FOUR. A category has
+    to belong to exactly one knowledge base, so `"all"` — legal on every read
+    above — is not a legal value here, and the schema must say so rather than
+    only the docstring."""
+    schema = tools["create_kb_category"].input_schema["properties"]["portal"]
+    advertised = _enum_values(schema)
+
+    assert advertised == set(_literal_values("create_kb_category", "portal"))
+    assert advertised == {"salonv3", "warni"}
+
+
+async def test_an_unrecognised_portal_is_refused_here_not_by_the_api(
+    wired,
+) -> None:
+    """🔴 SCHEMA VALIDATION, NOT A 422 A ROUND TRIP LATER. Mirrors the numeric
+    enum guard: a typo in `portal` never reaches Ebteqdesk."""
+    seen: list = []
+    wired(lambda request: (seen.append(request), json_response(200, {"data": []}))[1])
+
+    with pytest.raises(ToolError):
+        await srv.mcp.call_tool("search_kb_articles", {"portal": "salon-v3"})
+
+    assert seen == []
 
 
 async def test_the_optional_enums_admit_the_null_their_default_declares(tools) -> None:

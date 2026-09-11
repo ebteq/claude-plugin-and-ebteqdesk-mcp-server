@@ -259,6 +259,15 @@ mcp: MCPServer = MCPServer(
         "ONCE — never in a loop. Call one before filing an article, and call one "
         "to discover that an empty knowledge base needs a category and a folder "
         "first. "
+        "🔴 THE KNOWLEDGE BASE IS TWO SEPARATE PORTALS, SALON V3 AND WARNI, and "
+        "every category, folder and article belongs to exactly one — a folder's "
+        "`portal` comes from `list_kb_tree`. Because `kb_folder_id` is the one "
+        "field `propose_kb_article` can never change afterwards, PICKING A "
+        "FOLDER PICKS A PORTAL, permanently: a Warni article filed into a Salon "
+        "V3 folder sits on the wrong product's public help site for good, and "
+        "there is no move and no delete-article tool to fix it with. Ask which "
+        "product an article is for before choosing its folder if that is not "
+        "already obvious. "
         "🔴 `reorder_kb_children` TAKES THE WHOLE ORDERED SIBLING LIST, NEVER A "
         "DELTA. Post every id in the set, in the order you want them; a partial "
         "list is a 422 and writes nothing, not a partial reorder. It is also one "
@@ -1295,6 +1304,7 @@ async def search_kb_articles(
     query: str | None = None,
     per_page: int | None = None,
     page: int | None = None,
+    portal: Literal["salonv3", "warni", "all"] | None = None,
 ) -> dict[str, Any]:
     """Search the Ebteqdesk knowledge base, or list it.
 
@@ -1325,6 +1335,12 @@ async def search_kb_articles(
         per_page: 1..100, default 25. A value outside that range is rejected with
             an error rather than clamped.
         page: 1-based page number.
+        portal: `"salonv3"`, `"warni"` or `"all"` — narrow the corpus to one
+            knowledge base or search both at once. 🔴 OMITTING IT MEANS
+            `"salonv3"`, NOT `"all"` — every caller written before Ebteqdesk
+            had two knowledge bases keeps seeing exactly what it always did.
+            An unrecognised value is rejected before this ever reaches
+            Ebteqdesk, not a 422 from the server.
 
     Returns `{"data": [...], "links": {...}, "meta": {...}}`. Each row is a
     SUMMARY — `slug`, `title`, `url`, `category`, `folder`, `tags`,
@@ -1360,14 +1376,16 @@ async def search_kb_articles(
     """
     return await _call(
         lambda client: client.search_kb_articles(
-            query=query, per_page=per_page, page=page
+            query=query, per_page=per_page, page=page, portal=portal
         )
     )
 
 
 @mcp.tool()
 async def get_kb_article(
-    slug: str, locale: Literal["en", "zhcn"] | None = None
+    slug: str,
+    locale: Literal["en", "zhcn"] | None = None,
+    portal: Literal["salonv3", "warni", "all"] | None = None,
 ) -> dict[str, Any]:
     """Fetch one knowledge base article, with its body, by slug.
 
@@ -1375,12 +1393,17 @@ async def get_kb_article(
 
     Args:
         slug: The article slug, e.g. "resetting-your-password". Slugs are frozen
-            at first publish, so they are permanent identifiers. Get one from
-            `search_kb_articles`; there is no lookup by numeric id.
+            at first publish, so they are permanent identifiers, and — unlike a
+            category's — GLOBALLY unique across both knowledge bases. Get one
+            from `search_kb_articles`; there is no lookup by numeric id.
         locale: `"en"` or `"zhcn"` (Simplified Chinese) to read the article AS A
             READER OF THAT LANGUAGE SEES IT. OMITTING IT IS NOT THE SAME AS
             ASKING FOR ENGLISH — see the block below, and do not treat the two
             as interchangeable.
+        portal: `"salonv3"`, `"warni"` or `"all"`. Since the slug is already
+            globally unique, this narrows the search rather than disambiguating
+            a collision. OMITTING IT MEANS `"salonv3"`, NOT `"all"`, matching
+            every other read here.
 
     Returns `{"data": {...}}` — the summary fields, minus `excerpt`, plus:
       - `seo` — `{"title", "description"}`
@@ -1435,7 +1458,9 @@ async def get_kb_article(
     report is that no published article answers that slug in that language —
     never that the article "is missing its translation", which you cannot know.
     """
-    return await _call(lambda client: client.get_kb_article(slug, locale=locale))
+    return await _call(
+        lambda client: client.get_kb_article(slug, locale=locale, portal=portal)
+    )
 
 
 @mcp.tool()
@@ -1526,6 +1551,7 @@ async def list_kb_proposals(
     review_state: Literal["pending", "approved", "rejected"] | None = None,
     per_page: int | None = None,
     page: int | None = None,
+    portal: Literal["salonv3", "warni", "all"] | None = None,
 ) -> dict[str, Any]:
     """List the knowledge base articles waiting on a review, approved, or
     REJECTED — with each rejection reason on the row.
@@ -1566,6 +1592,9 @@ async def list_kb_proposals(
         per_page: 1..100, default 25. Out of range is a 422, never a quietly
             smaller page.
         page: 1-based page number.
+        portal: `"salonv3"`, `"warni"` or `"all"` — narrow the queue to one
+            knowledge base's proposals or see both interleaved. 🔴 OMITTING IT
+            MEANS `"salonv3"`, NOT `"all"`, matching every other read here.
 
     Returns `{"data": [...], "links": {...}, "meta": {...}}`. Each row carries
     `id`, `reference`, `title`, `folder`, `category`, `tags`, `excerpt`,
@@ -1591,13 +1620,15 @@ async def list_kb_proposals(
     """
     return await _call(
         lambda client: client.list_kb_proposals(
-            review_state=review_state, per_page=per_page, page=page
+            review_state=review_state, per_page=per_page, page=page, portal=portal
         )
     )
 
 
 @mcp.tool()
-async def list_kb_tree() -> dict[str, Any]:
+async def list_kb_tree(
+    portal: Literal["salonv3", "warni", "all"] | None = None,
+) -> dict[str, Any]:
     """The knowledge base's STRUCTURE — every category, every folder, and THEIR
     IDS.
 
@@ -1612,6 +1643,27 @@ async def list_kb_tree() -> dict[str, Any]:
     all answers `{"data": []}`, which means `propose_kb_article` cannot be called
     until somebody creates a category and a folder. `create_kb_category` and
     `create_kb_folder` do that.
+
+    🔴 THE TREE SPANS TWO KNOWLEDGE BASES, SALON V3 AND WARNI, and every
+    category carries which one it belongs to in its own `portal` field —
+    folders and articles inherit it through their category rather than
+    repeating it. CHOOSING A FOLDER OFF THIS TREE CHOOSES A PORTAL: read a
+    category's `portal` before handing a caller its folders' ids, since
+    `kb_folder_id` is the one field `propose_kb_article` can never change
+    afterwards. See its docstring for the permanent consequence of getting
+    that wrong.
+
+    Args:
+        portal: `"salonv3"`, `"warni"` or `"all"` — return one knowledge base's
+            categories or interleave both. 🔴 OMITTING IT MEANS `"salonv3"`,
+            NOT `"all"` — every caller written before this knowledge base had
+            two portals keeps seeing exactly what it always did. With
+            `"all"`, the two portals' categories INTERLEAVE rather than
+            concatenate, because `position` is dense per portal — both
+            commonly have a category at `0` — so do not assume one portal's
+            categories are contiguous in the list; group by `portal` if you
+            need them separated. An unrecognised value is rejected before this
+            ever reaches Ebteqdesk.
 
     Requires the `kb:write` scope — not `kb:read`, even though this only reads.
     The tree is the AUTHORING structure: it carries ids and internal folders,
@@ -1628,14 +1680,17 @@ async def list_kb_tree() -> dict[str, Any]:
     the desk, and may name internal teams, systems or accounts. Use them to
     choose where to file; do not repeat them into a public reply.
 
-    No arguments and no paging: the structure is a few hundred rows at most.
+    No paging: the structure is a few hundred rows at most, portal filter or not.
 
     Returns `{"data": [...]}`, ordered by `position` then `id` at both levels:
 
-      - Each category — `id`, `name`, `slug`, `description`, `position`, and
-        `folders`, which is always present and is `[]` for a category with none.
+      - Each category — `id`, `name`, `slug`, `description`, `position`,
+        `portal` (`"salonv3"` or `"warni"`), and `folders`, which is always
+        present and is `[]` for a category with none.
       - Each folder — `id`, `kb_category_id`, `name`, `slug`, `description`,
-        `visibility`, `position`, `articles_count`.
+        `visibility`, `position`, `articles_count`. A folder's own portal is
+        its category's — it is not repeated on the folder row here, though
+        `list_kb_folders` copies it down for you.
 
     `visibility` is `agents` (internal — the default and what every folder
     created through this API gets), `customers`, or `public`. It is what the
@@ -1662,8 +1717,18 @@ async def list_kb_tree() -> dict[str, Any]:
 
     The folder `slug` and category `slug` are re-derived whenever a name changes,
     so they are NOT stable identifiers — use `id`.
+
+    🔴 IF `portal` WAS PASSED AND THE INSTALL DOES NOT UNDERSTAND IT, this
+    raises rather than returning a mixed result. An Ebteqdesk install that
+    predates two-knowledge-base support answers this same 200 with the same
+    unfiltered tree it always gave — Laravel silently drops a query parameter
+    no route declares — so returning it as if it were `portal`-filtered would
+    be a wrong answer with no error to flag it. This tool detects that case
+    (no category in the response carries a `portal` key at all, despite one
+    being requested) and raises instead, naming the Ebteqdesk release that
+    needs to be deployed first. Omitting `portal` never triggers this.
     """
-    return await _call(lambda client: client.list_kb_tree())
+    return await _call(lambda client: client.list_kb_tree(portal=portal))
 
 
 # --------------------------------------------------------------------------- #
@@ -1688,7 +1753,9 @@ async def list_kb_tree() -> dict[str, Any]:
 
 
 @mcp.tool()
-async def list_kb_categories() -> dict[str, Any]:
+async def list_kb_categories(
+    portal: Literal["salonv3", "warni", "all"] | None = None,
+) -> dict[str, Any]:
     """Every knowledge base CATEGORY, flat — the top level, without the folders.
 
     Use it to answer "what categories exist?" and to pick a `kb_category_id` for
@@ -1712,13 +1779,25 @@ async def list_kb_categories() -> dict[str, Any]:
     accounts. Use them to choose where to file; do not repeat them into a public
     reply.
 
-    No arguments and no paging.
+    Args:
+        portal: `"salonv3"`, `"warni"` or `"all"` — same vocabulary and same
+            default as `list_kb_tree`, because this IS that tool with `folders`
+            dropped. 🔴 OMITTING IT MEANS `"salonv3"`, NOT `"all"`. Passed
+            straight through to `list_kb_tree`, so it is also behind that
+            tool's un-upgraded-API guard — see `list_kb_tree`'s docstring: an
+            install that silently ignored the filter raises here too, rather
+            than this projection quietly handing back both portals through a
+            flattened view that no longer says which categories came from
+            which.
+
+    No paging.
 
     Returns `{"data": [...]}`, ordered by `position` then `id`, each row
-    `{"id", "name", "slug", "description", "position"}`. The `slug` is re-derived
-    whenever the name changes, so it is NOT a stable identifier — use `id`.
+    `{"id", "name", "slug", "description", "position", "portal"}`. The `slug` is
+    re-derived whenever the name changes, so it is NOT a stable identifier —
+    use `id`.
     """
-    tree = await _call(lambda client: client.list_kb_tree())
+    tree = await _call(lambda client: client.list_kb_tree(portal=portal))
 
     return {
         "data": [
@@ -1729,7 +1808,10 @@ async def list_kb_categories() -> dict[str, Any]:
 
 
 @mcp.tool()
-async def list_kb_folders(kb_category_id: int | None = None) -> dict[str, Any]:
+async def list_kb_folders(
+    kb_category_id: int | None = None,
+    portal: Literal["salonv3", "warni", "all"] | None = None,
+) -> dict[str, Any]:
     """Every knowledge base FOLDER, flat — all of them, or one category's.
 
     This is where a `kb_folder_id` for `propose_kb_article` comes from when you
@@ -1751,13 +1833,41 @@ async def list_kb_folders(kb_category_id: int | None = None) -> dict[str, Any]:
             category returns `{"data": []}` rather than an error, because this
             filters a list it has already fetched and has no 404 to give you;
             call `list_kb_categories` if you need to know whether it exists.
+        portal: `"salonv3"`, `"warni"` or `"all"` — same vocabulary and same
+            default as `list_kb_tree`, because every folder returned here comes
+            from that tool's response before the flatten. 🔴 OMITTING IT MEANS
+            `"salonv3"`, NOT `"all"`. This is the tool this server's own docs
+            point to as the shortcut for picking a destination folder — see
+            `propose_kb_article`'s `kb_folder_id` — so it has to be able to
+            narrow to one product's folders, not just show `portal` on rows it
+            cannot filter. `kb_category_id` filtering, if also given, applies
+            AFTER this.
+
+    🔴 THIS IS ALSO BEHIND `list_kb_tree`'s UN-UPGRADED-API GUARD, since this
+    tool calls that one to get its data. Passing `portal` against an install
+    that predates two-knowledge-base support raises `StalePortalApiError`
+    here too, rather than this flattened, `kb_category_id`-filterable view
+    silently handing back both knowledge bases' folders mixed together — which
+    would be a worse trap than the same failure on `list_kb_tree`, because
+    nothing in this projection's shape would tell a caller which folder
+    belonged to which portal.
 
     Requires the `kb:write` scope, resolving only while the key carries it AND
     the account's role holds `kb.manage` — ADMINISTRATOR AND SUPERVISOR ONLY.
 
     Returns `{"data": [...]}`, ordered by category `position` then folder
     `position`, each row `{"id", "kb_category_id", "name", "slug", "description",
-    "visibility", "position", "articles_count"}`.
+    "visibility", "position", "articles_count", "portal"}`.
+
+    🔴 `portal` (`"salonv3"` or `"warni"`) IS COPIED DOWN FROM THE PARENT
+    CATEGORY, NOT SOMETHING `GET /api/v1/kb/tree` PUTS ON A FOLDER ROW ITSELF.
+    Flattening folders out of their categories would otherwise lose it —
+    `kb_category_id` survives the flatten but the category's `portal` does
+    not, and this tool's own advice above is to use it as the shortcut for
+    picking a destination folder. Since `kb_folder_id` is the one field
+    `propose_kb_article` can never change afterwards, filing through a folder
+    whose portal you could not see would be choosing a knowledge base blind.
+    Read it here exactly as you would off `list_kb_tree`.
 
     🔴 `visibility` IS THE ONE FIELD TO READ BEFORE FILING ANYTHING. It is
     `agents` (internal — the default, and what every folder created through this
@@ -1775,10 +1885,16 @@ async def list_kb_folders(kb_category_id: int | None = None) -> dict[str, Any]:
     `position` is the folder's index WITHIN ITS CATEGORY, so it repeats across
     the flat list — two folders can both be at 0. It is not a global rank.
     """
-    tree = await _call(lambda client: client.list_kb_tree())
+    tree = await _call(lambda client: client.list_kb_tree(portal=portal))
 
+    # 🔴 `portal` LIVES ON THE CATEGORY IN THE RAW RESPONSE, NOT THE FOLDER —
+    # copy it down here, onto a NEW dict, before the flatten below discards
+    # each folder's only path back to its category's `portal`. Mutating the
+    # fetched folder dict in place would work too, but a copy keeps this
+    # projection from silently depending on `client.list_kb_tree()` never
+    # being handed the same dict twice.
     folders = [
-        folder
+        {**folder, "portal": category.get("portal")}
         for category in tree.get("data", [])
         for folder in category.get("folders", [])
     ]
@@ -2429,6 +2545,16 @@ async def propose_kb_article(
             visibility change wearing an organisational costume and stays a
             human act. Choose deliberately; if you are unsure which folder is
             right, ask the user rather than guessing.
+            🔴 IT ALSO PICKS THE PORTAL, AND THAT CONSEQUENCE IS PERMANENT TOO.
+            Every folder belongs to exactly one of the two knowledge bases,
+            Salon V3 or Warni — `list_kb_tree` reports it as the folder's
+            category's `portal`, and `list_kb_folders` copies it onto the
+            folder row itself. A Warni article filed into a Salon V3 folder is
+            on the wrong product's public help site, PERMANENTLY: there is no
+            `update_kb_article` argument that moves it and no delete-article
+            tool to remove it and refile it correctly. If it is not already
+            obvious which product an article is for, ask before picking its
+            folder.
         title: REQUIRED, max 255 characters.
         body: The article body as HTML, not markdown — Ebteqdesk stores HTML and
             has no markdown form. It is SANITISED on write, so what comes back
@@ -2830,7 +2956,9 @@ async def update_kb_article(
 
 @mcp.tool()
 async def create_kb_category(
-    name: str, description: str | None = None
+    name: str,
+    description: str | None = None,
+    portal: Literal["salonv3", "warni"] | None = None,
 ) -> dict[str, Any]:
     """WRITES TO EBTEQDESK — creates a REAL category in the live knowledge base.
 
@@ -2844,9 +2972,10 @@ async def create_kb_category(
     user before calling, and never retry a call that timed out; fetch
     `list_kb_tree` to see whether the first one landed.
 
-    Create one only when `list_kb_tree` shows no suitable category. Filing into
-    an existing one is almost always right — a knowledge base whose structure
-    grows a category per article is worse than one with none.
+    Create one only when `list_kb_tree` shows no suitable category in the
+    portal you mean. Filing into an existing one is almost always right — a
+    knowledge base whose structure grows a category per article is worse than
+    one with none.
 
     Requires the `kb:write` scope, which resolves only while the key carries it
     AND the account's role holds `kb.manage`. That ability is granted to
@@ -2856,21 +2985,37 @@ async def create_kb_category(
     Args:
         name: REQUIRED, max 120 characters.
         description: Optional, max 255 characters. Omit it to leave it empty.
+        portal: `"salonv3"` or `"warni"` — which knowledge base the category
+            belongs to. 🔴 `"all"` IS NOT ACCEPTED HERE AND IS A 422, unlike on
+            the read tools: a category has to belong to exactly one knowledge
+            base. Absent, `null` or `""` all default to `"salonv3"`. 🔴 THIS IS
+            WRITE-ONCE — there is no way to move a category to the other
+            knowledge base afterwards; `update_kb_category` does not accept
+            `portal` and the server drops the key if one is sent. Choose
+            deliberately: every folder and article filed under this category
+            can only ever reach that one portal's public help site.
 
     🔴 THE SLUG IS DERIVED FROM THE NAME AND CANNOT BE SET. A collision is a 422
     on `name`, and it is checked against the DERIVED slug rather than the name —
     so "POS" and "  p.o.s!  " COLLIDE even though they are different strings.
-    Category slugs are unique GLOBALLY (folder slugs are not — see
-    `create_kb_folder`). If you get that 422, a category with that name already
-    exists: read `list_kb_tree` and use it rather than inventing a variant.
+    🔴 Category slugs are unique PER PORTAL, NOT globally (folder slugs are
+    unique only within their category — see `create_kb_folder` — and article
+    slugs are unique globally, unlike either). A "POS" category already
+    existing in Warni does not block "POS" in Salon V3; it is a collision only
+    against another category in the SAME `portal`. If you get that 422, a
+    category with that name already exists IN THAT PORTAL: read `list_kb_tree`
+    and use it rather than inventing a variant.
 
     Returns 201 `{"data": {...}}` with the new `id`, which is what
-    `create_kb_folder` takes as `kb_category_id`. `folders` is `[]` — a new category
+    `create_kb_folder` takes as `kb_category_id`, and the `portal` it was
+    actually created with. `folders` is `[]` — a new category
     holds nothing, and `propose_kb_article` needs a FOLDER, so this call alone
     does not let you file an article.
     """
     return await _call(
-        lambda client: client.create_kb_category(name=name, description=description)
+        lambda client: client.create_kb_category(
+            name=name, description=description, portal=portal
+        )
     )
 
 
@@ -2887,9 +3032,10 @@ async def update_kb_category(
     ARTICLE — whose slug is frozen at first publish and never moves again — a
     category slug follows its name on every save, and it is a segment of the
     portal address of every folder page beneath it. So renaming "POS" to "Point
-    of Sale" moves `/support/kb/pos/...` to `/support/kb/point-of-sale/...` and
-    any link a colleague or a signed-out visitor saved stops working. There is
-    no redirect.
+    of Sale" in the Salon V3 knowledge base moves
+    `/support/salonv3-kb/pos/...` to `/support/salonv3-kb/point-of-sale/...`
+    and any link a colleague or a signed-out visitor saved stops working.
+    There is no redirect.
     Say so before you do it, and check the `slug` in the response to see what it
     became.
 
@@ -2913,16 +3059,28 @@ async def update_kb_category(
             slug and the URL — completely alone.
         description: New description, max 255.
 
+    🔴 THERE IS NO `portal` ARGUMENT HERE, AND THAT IS NOT AN OMISSION TO WORK
+    AROUND. A category's knowledge base is fixed at `create_kb_category` and
+    stays fixed: the endpoint DROPS an unrecognised `portal` key rather than
+    rejecting it, so sending one would silently do nothing — worse than the
+    argument not existing, because it would read as a working control. There is
+    no move endpoint anywhere on this API, so a category created in the wrong
+    knowledge base cannot be relocated through it at all; it can only be
+    recreated under the right `portal` and the old one deleted once it is
+    empty.
+
     OMITTED ARGUMENTS ARE NOT EDITED. Passing only `description` leaves the name
     and the slug untouched, which is the safe way to annotate a category. An
     argument passed as an EMPTY STRING is an edit that CLEARS the field, so
     `description=""` removes the description.
 
-    A name colliding on the derived slug with ANOTHER category is a 422 on
-    `name`; re-saving a category under its own name is not a collision. An id
-    that does not exist is a 404.
+    A name colliding on the derived slug with ANOTHER category IN THE SAME
+    `portal` is a 422 on `name`; re-saving a category under its own name is not
+    a collision, and nor is reusing a name a category in the OTHER knowledge
+    base already holds. An id that does not exist is a 404.
 
-    Returns 200 `{"data": {...}}` with the re-derived `slug`.
+    Returns 200 `{"data": {...}}` with the re-derived `slug`. `portal` is in the
+    response too, unchanged from creation — this call cannot move it.
     """
     return await _call(
         lambda client: client.update_kb_category(
@@ -3033,8 +3191,12 @@ async def create_kb_folder(
     🔴 THE SLUG IS DERIVED FROM THE NAME AND CANNOT BE SET. A collision is a 422
     on `name`, checked against the DERIVED slug — so "Errors" and "  errors!  "
     COLLIDE. Folder slugs are unique ONLY WITHIN THEIR CATEGORY, unlike category
-    slugs which are global: "FAQ" under Billing and "FAQ" under Account are both
-    fine, and that is deliberate.
+    slugs, which are unique PER PORTAL (see `create_kb_category`) — "FAQ" under
+    Billing and "FAQ" under Account are both fine, and that is deliberate.
+    🔴 THREE SLUG SCOPES ON THIS API, NOT TWO: category slugs are unique per
+    portal, folder slugs (this one) are unique only within their category, and
+    article slugs are unique GLOBALLY across both portals — the widest of the
+    three, and the only one this narrowing does not touch.
 
     Returns 201 `{"data": {...}}`. **The `id` in that response is the
     `kb_folder_id` `propose_kb_article` takes**, so you can create a folder and
@@ -3179,6 +3341,25 @@ async def reorder_kb_children(
     and it means a 422 here is information — your list is out of date, re-read it
     and try again — not a bug to work around.
 
+    🔴 BREAKING SINCE TWO-KNOWLEDGE-BASE SUPPORT, AND ONLY ON `scope="categories"`:
+    `ordered_ids` MUST BE ONE PORTAL'S WHOLE CATEGORY LIST, NEVER BOTH PORTALS'
+    TOGETHER. Before Salon V3 and Warni existed, "the complete sibling set"
+    meant every category in the installation — which is exactly what a caller
+    written for that world still posts, and it is now refused:
+
+        422 on `errors.ids`: "The order must list categories from a single
+        knowledge base portal. Reorder each portal in its own request."
+
+    The fix is NOT a shorter list — it is still that portal's WHOLE set, just
+    one portal at a time. Read one portal's categories with
+    `list_kb_tree(portal="salonv3")` or `list_kb_tree(portal="warni")`, reorder
+    that list, then repeat the call for the other portal if both need
+    reordering. `scope="folders"` and `scope="articles"` need no such split:
+    a folder's siblings are one category's folders and an article's siblings
+    are one folder's articles, and a category belongs to exactly one portal —
+    so neither of those sibling sets could ever span two portals in the first
+    place.
+
     ⚠️ THIS IS THE ONE WRITE ON THIS SERVER THAT IS SAFE TO RETRY. Positions are
     assigned by index, so posting the same body twice leaves the same order and
     answers 200 both times. Every other write tool must not be retried blind.
@@ -3204,12 +3385,15 @@ async def reorder_kb_children(
             and passing it on "categories" would be an argument with nowhere to
             go that a caller would read as having taken effect.
 
-    Ids come from `list_kb_categories`, `list_kb_folders`, or `list_kb_tree`.
-    ARTICLE ids come from none of them — the tree carries an `articles_count` and
-    not the articles — so for `scope="articles"` read the current list from this
-    tool's own previous response, or from the folder in the Ebteqdesk UI. Article
-    ids include DRAFTS, which hold positions like any other article and must be
-    in the list.
+    Ids come from `list_kb_categories`, `list_kb_folders`, or `list_kb_tree`. For
+    `scope="categories"`, that means `list_kb_tree(portal=...)` with an
+    EXPLICIT `"salonv3"` or `"warni"` — see the portal block above — since the
+    ordered list must be one portal's, never both. ARTICLE ids come from none
+    of them — the tree carries an `articles_count` and not the articles — so
+    for `scope="articles"` read the current list from this tool's own previous
+    response, or from the folder in the Ebteqdesk UI. Article ids include
+    DRAFTS, which hold positions like any other article and must be in the
+    list.
 
     A `parent_id` that does not exist is a 404. An id in `ordered_ids` that
     belongs to a different parent is part of the 422 above — a reorder cannot
