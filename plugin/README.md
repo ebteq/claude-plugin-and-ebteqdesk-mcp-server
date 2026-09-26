@@ -4,7 +4,7 @@ Four Claude Code skills for working an Ebteqdesk helpdesk through its MCP server
 
 | Skill | Covers |
 |---|---|
-| `ebteqdesk:tickets` | List and read tickets (own queue, or the whole account with `scope="all"`), the full conversation, attachments, reply, internal notes, move a ticket between working states or reopen one, open a ticket, close one |
+| `ebteqdesk:tickets` | List and read tickets (own queue, or the whole account with `scope="all"`), the full conversation, attachments, reply, internal notes, move a ticket between working states or reopen one, change or clear a ticket's type, open a ticket, close one |
 | `ebteqdesk:escalations` | The shared escalation queue, reading and replying on escalated tickets, escalate, de-escalate, close |
 | `ebteqdesk:knowledge-base` | Search and read articles (including per-language versions), the category/folder tree across Ebteqdesk's two knowledge bases (Salon V3 and Warni), propose and update articles, check a review verdict or the proposal queue, upload and embed screenshots, create/delete categories and folders, reorder |
 | `ebteqdesk:reports` | The account-wide ticket report and the per-category escalation report |
@@ -25,6 +25,13 @@ way the KB pass did, and found real drift in all three — worst in `reports`
 and `escalations`, both of which carried running advice that was actively
 wrong rather than merely incomplete — see
 [Keeping these skills true](#keeping-these-skills-true) for the itemised list.
+
+✅ **`ebteqdesk:tickets` has since been re-read against `4.4.0` (43 tools)**,
+the release that adds `set_ticket_category`, and its line says so. The other
+three still say `4.3.0`, correctly: the only thing 4.4.0 changed that they
+mention is the count of retry-safe writes (two → three), and that sentence was
+corrected in `escalations` and `knowledge-base` in the same pull request without
+moving their lines, since neither was re-read in full.
 
 ## What this plugin is not
 

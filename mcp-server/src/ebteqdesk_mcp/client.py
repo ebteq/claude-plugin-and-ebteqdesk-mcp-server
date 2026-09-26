@@ -917,11 +917,12 @@ class EbteqdeskClient:
     #      positions by INDEX, so replaying the same body is a no-op that
     #      answers 200 with the same list.
     #
-    #      ⚠️ PUT /tickets/{id}/status IS THE OTHER, AND THE ONLY ONE ON THE
-    #      TICKET SURFACE. The server guards the no-op case, so sending a
-    #      status the ticket already holds writes no row, appends no history
-    #      entry, and still answers 200. Nothing here retries either of them
-    #      automatically — the caller may, the client will not.
+    #      ⚠️ PUT /tickets/{id}/status AND PUT /tickets/{id}/category ARE THE
+    #      OTHERS, AND THE ONLY ONES ON THE TICKET SURFACE. The server guards
+    #      the no-op case on both, so sending a status or a type the ticket
+    #      already holds writes nothing and still answers 200. Nothing here
+    #      retries any of them automatically — the caller may, the client will
+    #      not.
     #
     #   2. THERE IS NO DRY RUN, deliberately. The server has no dry-run mode, so
     #      a client-side one could only describe the request it WOULD send. It
@@ -981,6 +982,12 @@ class EbteqdeskClient:
         null, so the server applies its own documented defaults (priority 2 /
         normal, status 1 / new, no category, no reference, no tags) instead of
         this client having a second, drifting copy of them.
+
+        `category` is a ticket-type SLUG and is the ONLY way to set the type on
+        create. The server refuses the alias keys `type`, `ticket_type` and
+        `ticket_type_id` with a 422 naming `category`; this method has no
+        parameter for any of them and never sends one. To change the type
+        afterwards, `set_ticket_category`.
 
         Requires the `ticket:write` scope and the `ticket.create` ability.
         """
@@ -1189,6 +1196,73 @@ class EbteqdeskClient:
             "PUT",
             f"/api/v1/tickets/{_ticket_id(ticket_id)}/status",
             json={"status": status},
+        )
+
+    async def set_ticket_category(
+        self, ticket_id: int, *, category: str | None
+    ) -> dict[str, Any]:
+        """PUT /api/v1/tickets/{id}/category — set or clear the ticket's TYPE.
+
+        200 ``{"data": <ticket>}`` and nothing else, exactly as
+        `set_ticket_status` — the same TicketResource, whose `category` is now
+        the `{slug, name}` pair that was set, or null.
+
+        `category` is a `ticket_types.slug` — the same vocabulary as
+        `create_ticket`'s `category` and `list_tickets_by_category`'s path — or
+        None, which is SENT as JSON null and CLEARS the type. The key is always
+        sent: the server requires the key (null being a legal value of it), so
+        an omitted key is a 422, and a None that this method dropped from the body the way `create_ticket`
+        drops its optionals would turn "clear the type" into that 422. The
+        slug is otherwise passed through unvalidated, so the server's list of
+        types stays the only list.
+
+        🔴 A BLANK STRING IS REFUSED HERE, before anything is sent. Laravel's
+        global TrimStrings and ConvertEmptyStringsToNull middleware run on JSON
+        bodies too, so `""` or `"  "` would reach the controller as null and
+        CLEAR the type — a destructive reading of what was almost certainly a
+        missing value. Clearing has to be asked for with None.
+
+        What the server refuses, all as a 422 on `category`: a slug no type
+        carries, a slug whose type has been soft-deleted (retired), and any of
+        the alias keys `type`, `ticket_type`, `ticket_type_id` — which this
+        method never sends. A type that has NO slug cannot be set through this
+        endpoint at all; types created since this endpoint shipped derive one
+        from their name ("Admin" -> `admin`), older ones may not have one.
+
+        🔴 NOTHING IS SENT AND NOTHING IS RECORDED. No mail to the requester, no
+        agent notification, and — unlike `set_ticket_status` — NO history entry
+        either. Sending the type the ticket already holds writes nothing and
+        still answers 200, so this is safe to repeat; nothing here repeats it
+        automatically.
+
+        Ownership, as on every other ticket write: a ticket not assigned to the
+        token's account is a 404, or a 403 with `reason: "ticket_not_assigned"`
+        (`TicketNotAssignedError`) when it sits on the shared escalation queue.
+        No `on_scope_error` hook, for `set_ticket_status`'s reason: the scope
+        requirement does not grow on an escalated ticket.
+
+        ⚠️ ONLY ON SERVERS THAT HAVE THIS ENDPOINT (Ebteqdesk PR #261). An
+        older install has no such route and answers 404 or 405 for EVERY id,
+        the caller's own tickets included. Nothing here detects that — a route
+        miss and a ticket this key cannot write are the same 404 on the wire —
+        so the MCP tool's description says it instead.
+
+        Requires the `ticket:write` scope and the `ticket.reply` ability.
+        """
+        if category is not None and (
+            not isinstance(category, str) or not category.strip()
+        ):
+            raise ValueError(
+                f"category must be a ticket-type slug such as 'bp-task', or None "
+                f"to clear the ticket's type — not {category!r}. A blank string "
+                f"is refused rather than sent, because the server would read it "
+                f"as null and clear the type."
+            )
+
+        return await self._request(
+            "PUT",
+            f"/api/v1/tickets/{_ticket_id(ticket_id)}/category",
+            json={"category": category},
         )
 
     async def close_ticket(

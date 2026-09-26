@@ -24,14 +24,14 @@ run; it is not an Ebteqdesk.
 > replies without a login. The knowledge base is a separate surface again — its
 > `public` articles are served to signed-out visitors.
 
-> ⚠️ **Twenty-one of the forty-two tools write to a live helpdesk.** They send
+> ⚠️ **Twenty-two of the forty-three tools write to a live helpdesk.** They send
 > email to real requesters, notifications to real agents, drafts into a human's
 > review queue, and new categories, folders and orderings into the knowledge
 > base, and **nothing they do can be undone through this API** — there is no
 > delete-ticket, no delete-comment, no delete-note and no delete-article
 > endpoint.
 >
-> 🔴 **Two of the twenty-one destroy structure.** `delete_kb_category` and
+> 🔴 **Two of the twenty-two destroy structure.** `delete_kb_category` and
 > `delete_kb_folder` remove a real row from the knowledge base and **there is no
 > undo, no trash and no restore**. Both are *refusals* rather than cascades —
 > a category still holding folders, or a folder still holding articles, is
@@ -40,17 +40,17 @@ run; it is not an Ebteqdesk.
 > There is no dry-run mode; see
 > [Write tools](#write-tools) for why one would be a lie rather than a safeguard.
 > If you want a read-only deployment, mint a key without `ticket:write`,
-> `escalation:write`, `kb:write` and `admin:write`: the twenty-one write tools
+> `escalation:write`, `kb:write` and `admin:write`: the twenty-two write tools
 > still appear in the tool list, and every one of them refuses.
 >
 > **No tool mails the requester by default.** `comment_on_ticket` always does —
 > that is what it is for — and `close_ticket` and `create_ticket` do only when
 > asked for `status: 4`. The ten knowledge base writes mail nobody, and neither
-> does `set_ticket_status`, which is the only ticket write that contacts no one
-> at all. See
+> do `set_ticket_status` and `set_ticket_category`, the two ticket writes that
+> contact no one at all. See
 > [Which tools can email the requester](#which-tools-can-email-the-requester).
 
-> 🔴 **Four of the twenty-one do not touch tickets or articles at all — they
+> 🔴 **Four of the twenty-two do not touch tickets or articles at all — they
 > decide who may act.** `create_agent` creates a real account that can sign in,
 > `update_agent` changes what role a person holds, `issue_api_key` hands another
 > account a working bearer credential, and `revoke_api_key` takes one away
@@ -120,8 +120,28 @@ Installing the wrong one gets you two HTTP stacks in one environment.
 
 `ebteqdesk-mcp` itself is versioned with semver, and the version means
 something: **the major moves when a tool's observable contract does.** This is
-`4.3.0`; `serverInfo.version` in the MCP handshake reports the same string, so a
+`4.4.0`; `serverInfo.version` in the MCP handshake reports the same string, so a
 host can tell a renamed tool argument from an outage.
+
+**4.4.0 adds one tool, `set_ticket_category`, and moves nothing an existing
+caller wrote.** It sets or clears a ticket's type through
+`PUT /api/v1/tickets/{id}/category` (Ebteqdesk PR #261), taking the list from
+forty-two to forty-three and the write half from twenty-one to twenty-two. It
+takes a ticket-type **slug**, or `null` to clear the type; it mails nobody,
+notifies nobody and — unlike `set_ticket_status` — leaves **no history entry**,
+and sending the type a ticket already holds is a no-op, so it joins
+`set_ticket_status` and `reorder_kb_children` as the third write that is safe
+to retry. `create_ticket`'s description now also says what the same server
+release enforces: `category` is the only way to set the type on create, and
+`type` / `ticket_type` / `ticket_type_id` are refused with a 422. This client
+never sent any of those, so no existing call changes outcome.
+
+⚠️ **It needs an Ebteqdesk that has the endpoint.** An install without
+PR #261 has no such route and answers `404` (or `405`) for every ticket id,
+including your own — and that `404` is indistinguishable on the wire from the
+ownership `404` the write surface already returns, so there is no
+`StalePortalApiError`-style guard here. The tool description tells the model
+instead.
 
 **4.3.0 adds two knowledge bases and moves nothing an existing caller wrote.**
 Ebteqdesk now hosts Salon V3 (`salonv3`, the pre-existing one) and Warni
@@ -485,7 +505,7 @@ shown once.
 | `kb:read` | `search_kb_articles`, `get_kb_article` | read |
 | `reports:read` | `get_reports_summary` — **also needs the `admin.access` ability** | read |
 | `escalation-reports:read` | `get_escalation_report` | read |
-| `ticket:write` | `create_ticket`, `comment_on_ticket`, `add_private_note`, `set_ticket_status`, `close_ticket` | **write** |
+| `ticket:write` | `create_ticket`, `comment_on_ticket`, `add_private_note`, `set_ticket_status`, `set_ticket_category`, `close_ticket` | **write** |
 | `escalation:write` | `escalate_ticket`, `de_escalate_ticket`, and `add_private_note` **on an escalated ticket** — internal only | **write** |
 | `escalation:reply` | `comment_on_ticket` **on an escalated ticket**, and `close_ticket` **with a `body` on one** — **emails the requester's address** | **write** |
 | `kb:write` | `propose_kb_article`, `update_kb_article`, `create_kb_category`, `update_kb_category`, `delete_kb_category`, `create_kb_folder`, `update_kb_folder`, `delete_kb_folder`, `reorder_kb_children`, `upload_kb_media`, and the five reads `get_kb_article_review`, `list_kb_proposals`, `list_kb_tree`, `list_kb_categories` and `list_kb_folders` | **write** |
@@ -503,15 +523,15 @@ unresolved escalated ticket in the installation, whoever it is assigned to.
 Tick it when you want that; leave it off when you do not.
 
 Only `whoami` works without any scope. A key minted with none is the most common
-bad first run: the server connects, all forty-two tools appear, and forty-one
-of the forty-two then refuse. **Scopes are fixed when a key is minted and cannot be added
+bad first run: the server connects, all forty-three tools appear, and forty-two
+of the forty-three then refuse. **Scopes are fixed when a key is minted and cannot be added
 to an existing key** — getting this wrong means minting a second one.
 
 **Ticking the four write scopes is a decision, not a formality.** They are what
 let an agent email your requesters, file drafts into a reviewer's queue, and —
 with `admin:write` — create accounts and hand out credentials. Omit them and you
-have a read-only deployment that still lists all forty-two tools and refuses the
-twenty-one writes.
+have a read-only deployment that still lists all forty-three tools and refuses the
+twenty-two writes.
 
 🔴 **`admin:read` and `admin:write` are the two scopes to think hardest about,
 and the two an existing key cannot have.** They gate the account roster and the
@@ -529,7 +549,7 @@ drafts — the same corpus `update_kb_article` addresses. `list_kb_tree`,
 the *authoring* structure: ids, and `agents`-only folders. `kb:read` gates the
 *public* help corpus and is deliberately the one scope with no role requirement
 behind it, so mounting any of those reads on it would widen that corpus.
-Twenty-six tools need a write scope and twenty-one of them actually write.
+Twenty-seven tools need a write scope and twenty-two of them actually write.
 
 🔴 **`list_kb_proposals` is installation-wide, like `list_escalations`.** It
 lists every article carrying a review state in the whole install — another
@@ -673,7 +693,7 @@ claude mcp add ebteqdesk \
 > same string.** `ebteqdesk-mcp` is the **executable**; `ebteqdesk` is the
 > **key** this server is registered under, and the key is what prefixes every
 > tool name a model sees — `mcp__ebteqdesk__list_tickets`,
-> `mcp__ebteqdesk__close_ticket`, and forty more.
+> `mcp__ebteqdesk__close_ticket`, and forty-one more.
 >
 > **The key was `warnidesk` through 2.x.** It stayed behind during the rename
 > because those prefixed names are called from the Claude Code plugin, which at
@@ -702,7 +722,7 @@ Verify:
 claude mcp list          # -> ebteqdesk: ebteqdesk-mcp - ✓ Connected
 ```
 
-and inside Claude Code, `/mcp` lists the server and its forty-two tools.
+and inside Claude Code, `/mcp` lists the server and its forty-three tools.
 
 > 🔴 **The tools do not appear in the session you registered the server from.
 > Restart the client.**
@@ -710,7 +730,7 @@ and inside Claude Code, `/mcp` lists the server and its forty-two tools.
 > `claude mcp add` writes configuration; MCP servers are launched and their
 > tool lists fetched when a session **starts**. So the session you were in when
 > you ran the command keeps the tool list it booted with — `/mcp` shows nothing,
-> the forty-two tools are unavailable, and everything looks broken while the
+> the forty-three tools are unavailable, and everything looks broken while the
 > configuration is in fact correct.
 >
 > Quit Claude Code and start it again. `claude mcp list` works from any shell
@@ -862,7 +882,7 @@ the same reason.
 
 ## Tools
 
-Forty-two tools: twenty-one that read, twenty-one that write.
+Forty-three tools: twenty-one that read, twenty-two that write.
 
 The **Scope** column is the API key scope each tool needs; the **Ability**
 column is the role permission the *account* needs on top of it. Those are two
@@ -971,6 +991,7 @@ a page size you got. `links.next` carries `per_page` forward.
 | `escalate_ticket` | `POST /api/v1/tickets/{id}/escalate` | `escalation:write` | `ticket.reply` | **Notifies every Assistant.** Your **own** tickets only |
 | `de_escalate_ticket` | `DELETE /api/v1/tickets/{id}/escalate` | `escalation:write` | **`bp_escalation.reply`** | Clears the escalation timestamp. Works on **any** escalated ticket you can read |
 | `set_ticket_status` | `PUT /api/v1/tickets/{id}/status` | `ticket:write` | `ticket.reply`, **+ `ticket.close` when the ticket is currently resolved** | Moves it between working states (1/2/3/8). **Emails nobody, notifies nobody** |
+| `set_ticket_category` | `PUT /api/v1/tickets/{id}/category` | `ticket:write` | `ticket.reply` | Sets the ticket's type by slug, or clears it with `null`. **Emails nobody, notifies nobody, writes no history entry.** Needs an Ebteqdesk with PR #261 |
 | `close_ticket` | `POST /api/v1/tickets/{id}/close` | `ticket:write` **+ `escalation:reply` if a `body` is sent on an escalated ticket** | `ticket.close` | Resolves the ticket. **Emails a rating survey only if asked for `status: 4`** |
 | `propose_kb_article` | `POST /api/v1/kb/articles` | `kb:write` | `kb.manage` | Files a **draft** into a human's review queue |
 | `update_kb_article` | `PATCH /api/v1/kb/articles/{ref}` | `kb:write` | `kb.manage` | On a **draft**, rewrites it and **re-queues it for review** (200). On a **published** article, **stages a pending revision instead and leaves the live article untouched** (202, `revision` key) — never a 409 |
@@ -1159,8 +1180,9 @@ post again.
 Positions are dense and 0-based, so the first row of the response is always
 `position: 0`; report the response's positions, not the input.
 
-⚠️ **This is one of only two writes on this server that are safe to retry** —
-the other is `set_ticket_status`, whose no-op the server guards. Positions are
+⚠️ **This is one of only three writes on this server that are safe to retry** —
+the others are `set_ticket_status` and `set_ticket_category`, whose no-ops the
+server guards. Positions are
 assigned by index, so replaying the same body leaves the same order and answers
 `200`. Every other write tool must not be retried blind.
 
@@ -1171,7 +1193,7 @@ UI. Drafts hold positions like any other article and must be in the list.
 
 #### Which tools can email the requester
 
-Three of the twenty-one, and **no default triggers one**. Ebteqdesk being an
+Three of the twenty-two, and **no default triggers one**. Ebteqdesk being an
 internal desk does not change this list — the requester is a colleague, and the
 mail still leaves:
 
@@ -1186,7 +1208,8 @@ invite and no welcome, which is exactly why its generated password comes back in
 the response and has to be handed over out of band.
 
 The ten knowledge base writes mail nobody, and neither do `add_private_note`,
-`escalate_ticket`, `de_escalate_ticket` or `set_ticket_status`. The two article
+`escalate_ticket`, `de_escalate_ticket`, `set_ticket_status` or
+`set_ticket_category`. The two article
 writes land a draft
 for a human, and a draft is readable nowhere outside the desk; the four
 structure writes only create or rename `agents`-visibility categories and
@@ -1704,7 +1727,7 @@ Scope `ticket:write` · ability `ticket.create` · **files a real ticket**
 | `requester` | object | yes | The requester — on this internal desk, the member of staff who raised it. Its address is where Ebteqdesk mails every public reply. Two forms — see below. |
 | `priority` | integer | no | `enum` — 1 low, 2 normal (default), 3 high, 4 blocker. Anything else is refused by the tool, before any request. |
 | `status` | integer | no | `enum` — 1 new (default), 2 open, 3 pending, 8 waiting on customer (the API's own enum name `waitingOnCustomer`, inherited here and not renamed — on this desk it means waiting on the requester), 4 solved, 5 closed. Merged (6) and spam (7) are refused. ⚠️ **4 resolves the ticket on creation and emails the requester's address the survey.** |
-| `category` | string | no | A ticket-type slug, e.g. `bp-task`. An unknown slug is an **error**, not a silent "uncategorised". |
+| `category` | string | no | A ticket-type slug, e.g. `bp-task` — **the only way to set the type on create**. An unknown slug is an **error**, not a silent "uncategorised". There is no `type`, `ticket_type` or `ticket_type_id` argument, and the API refuses those keys with a 422 naming `category`. To change the type later, [`set_ticket_category`](#set_ticket_category). |
 | `reference_number` | string | no | Up to 64 characters. |
 | `tags` | string[] | no | Each up to 50 characters. |
 
@@ -1865,8 +1888,9 @@ ticket between two states leaves a permanent record of the flapping.
 
 ✅ **The no-op is safe to retry.** Sending the status a ticket already holds
 writes nothing and appends no history entry, and still answers `200` — the
-server guards it, which is why the endpoint is a `PUT`. This and
-`reorder_kb_children` are the only two writes here you may safely repeat.
+server guards it, which is why the endpoint is a `PUT`. This,
+[`set_ticket_category`](#set_ticket_category) and `reorder_kb_children` are the
+only three writes here you may safely repeat.
 
 ✅ **An escalated ticket needs nothing extra.** Unlike `comment_on_ticket` and
 `add_private_note`, this does **not** grow an `escalation:write` requirement on
@@ -1883,6 +1907,55 @@ including the period it spent solved.
   "data": {
     "id": 1,
     "status": { "id": 8, "name": "waitingOnCustomer" },
+    "…": "…"
+  }
+}
+```
+
+### `set_ticket_category`
+
+Scope `ticket:write` · ability `ticket.reply` · **emails nobody, writes no
+history** · needs an Ebteqdesk that includes PR #261
+
+| Argument | Type | Required | Notes |
+|---|---|---|---|
+| `ticket_id` | integer | yes | From `list_tickets`. Your **own** tickets only. |
+| `category` | string \| null | yes | A ticket-type **slug**, e.g. `bp-task` — read one off `category.slug` in `list_tickets`. `null` **clears** the type. Required even though `null` is legal, so clearing is never the result of a forgotten argument. A blank string is refused by the tool, because the server would read it as `null`. |
+
+Sets or clears the ticket's type — the `category` on every ticket payload —
+through `PUT /api/v1/tickets/{id}/category`. The body always carries the key,
+`{"category": "<slug>"}` or `{"category": null}`.
+
+🔴 **It records nothing.** No mail, no notification, and — unlike
+`set_ticket_status` — **no history entry**: nothing in `get_ticket`'s thread
+says the type changed or what it used to be. Read the old type off the ticket
+first if it matters.
+
+**What it refuses**, each a `422` on `category` with nothing written: a slug no
+type carries, and a slug whose type has been **retired** (soft-deleted). The
+server also refuses the alias keys `type`, `ticket_type` and `ticket_type_id`,
+which this tool never sends. A type that has
+**no slug** cannot be set through this API at all; types created from now on
+derive one from their name (`Admin` → `admin`).
+
+✅ **The no-op is safe to retry.** Sending the type the ticket already holds
+writes nothing and still answers `200`, and a real change mails and records
+nothing either.
+
+⚠️ **Ownership and older servers.** Like every ticket write, it acts only on a
+ticket assigned to the token's account: anything else is a `404`, or a `403`
+with `reason: ticket_not_assigned` for a shared-queue ticket. An Ebteqdesk
+without PR #261 has no such route and answers `404` or `405` for **every** id —
+including your own — so a `404` on a ticket `list_tickets` just showed you as
+yours means the server is too old, not that the ticket is gone.
+
+> Set ticket 1's type to admin.
+
+```json
+{
+  "data": {
+    "id": 1,
+    "category": { "slug": "admin", "name": "Admin" },
     "…": "…"
   }
 }
@@ -2212,7 +2285,7 @@ That is so `--help` cannot leave you staring at a process that is really just
 blocked reading a TTY.
 
 ```bash
-ebteqdesk-mcp --version     # -> ebteqdesk-mcp 4.3.0, on stderr
+ebteqdesk-mcp --version     # -> ebteqdesk-mcp 4.4.0, on stderr
 ```
 
 ⚠️ **If the command is not found, or the version comes back below 3.0.0, you
@@ -2289,8 +2362,8 @@ mcp-server/
 │   ├── py.typed        PEP 561 marker; this package ships its own types
 │   ├── config.py       environment -> Config, with redacting repr
 │   ├── errors.py       one exception per failure mode, actionable messages
-│   ├── client.py       the forty-two endpoints; payloads passed through verbatim
-│   └── server.py       MCPServer + forty-two tools; descriptions carry the API rules
+│   ├── client.py       one method per endpoint; payloads passed through verbatim
+│   └── server.py       MCPServer + forty-three tools; descriptions carry the API rules
 └── tests/
     ├── conftest.py                 shared fixtures; the mock sits at the SOCKET
     ├── test_client.py              the original read endpoints
