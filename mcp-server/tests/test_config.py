@@ -6,10 +6,12 @@ import pytest
 
 from ebteqdesk_mcp.config import (
     DEFAULT_TIMEOUT_SECONDS,
+    ENV_ALLOW_INSECURE_HTTP,
     ENV_BASE_URL,
     ENV_PREFIX,
     ENV_TIMEOUT,
     ENV_TOKEN,
+    ENV_UPLOAD_ROOT,
     Config,
 )
 from ebteqdesk_mcp.errors import ConfigurationError
@@ -192,6 +194,7 @@ def test_configuring_the_client_writes_nothing_to_stdout_or_stderr(capsys) -> No
         # first, and the one input that gets past that — `https://api/v1` —
         # raises IndexError instead). That is a PRE-EXISTING defect, unrelated
         # to the rename and not fixed here; it is reported separately.
+        ({"BASE_URL": "http://help.example.com"}, "plain http://"),
         ({"API_TOKEN": "6|"}, "truncated"),
         ({"TIMEOUT": "soon"}, "not a number"),
         ({"TIMEOUT": "0"}, "greater than zero"),
@@ -225,3 +228,115 @@ def test_repr_never_contains_the_token() -> None:
 
     assert "secret-token-value" not in rendered
     assert "redacted" in rendered
+
+
+# ──────────────────────────────── THE BEARER TOKEN AND PLAIN HTTP (5.0.0) ──
+#
+# 🔴 Every request carries `Authorization: Bearer <token>`. Before 5.0.0 an
+# `http://` base URL to ANY host was accepted, so a typo'd scheme or an old
+# bookmark put a replayable credential on the wire in the clear. Loopback is the
+# one exemption — the bytes never leave the machine and the Docker dev stack is
+# served over http — and everything else needs https or a deliberate override.
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "http://help.example.com",
+        "http://10.0.0.5:8086",
+        "http://192.168.1.20",
+        "http://0.0.0.0:8086",
+        # Names that merely START like a loopback host are not loopback.
+        "http://localhost.example.com",
+        "http://127.0.0.1.nip.io",
+        "HTTP://help.example.com",
+    ],
+)
+def test_plain_http_to_a_remote_host_is_refused(raw: str) -> None:
+    with pytest.raises(ConfigurationError) as excinfo:
+        Config.from_env(good_env(BASE_URL=raw))
+
+    message = str(excinfo.value)
+    assert message.startswith(ENV_BASE_URL)
+    assert "https://" in message
+    assert "bearer" in message
+    # The override is named, so an operator on a private network can find it.
+    assert f"{ENV_ALLOW_INSECURE_HTTP}=1" in message
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("http://localhost:8086", "http://localhost:8086"),
+        ("http://LOCALHOST:8086/", "http://LOCALHOST:8086"),
+        ("http://127.0.0.1", "http://127.0.0.1"),
+        # All of 127.0.0.0/8 is loopback, not just .1.
+        ("http://127.0.0.2:8000/api/v1", "http://127.0.0.2:8000"),
+        ("http://[::1]:8086", "http://[::1]:8086"),
+    ],
+)
+def test_plain_http_to_this_machine_is_still_allowed(raw: str, expected: str) -> None:
+    """The local Docker stack is http://localhost:<port>. Breaking it would make
+    the safe default unusable for the people most likely to hit it."""
+    assert Config.from_env(good_env(BASE_URL=raw)).base_url == expected
+
+
+def test_the_override_allows_a_remote_http_host_and_says_so_on_stderr(capsys) -> None:
+    config = Config.from_env(
+        good_env(BASE_URL="http://10.0.0.5:8086", ALLOW_INSECURE_HTTP="1")
+    )
+
+    assert config.base_url == "http://10.0.0.5:8086"
+
+    captured = capsys.readouterr()
+    # 🔴 STDOUT IS THE MCP TRANSPORT. The warning goes to stderr or nowhere.
+    assert captured.out == ""
+    assert "UNENCRYPTED" in captured.err
+    assert ENV_ALLOW_INSECURE_HTTP in captured.err
+    # The warning names the host, never the token.
+    assert "10.0.0.5" in captured.err
+    assert "secret-token-value" not in captured.err
+
+
+@pytest.mark.parametrize("value", ["true", "yes", "0", "", " "])
+def test_only_the_literal_1_turns_the_override_on(value: str) -> None:
+    """A security override is not truthiness-parsed: `=true` stays refused, and
+    the refusal tells the operator the exact spelling."""
+    with pytest.raises(ConfigurationError, match=f"{ENV_ALLOW_INSECURE_HTTP}=1"):
+        Config.from_env(
+            good_env(BASE_URL="http://help.example.com", ALLOW_INSECURE_HTTP=value)
+        )
+
+
+def test_https_never_warns_even_with_the_override_set(capsys) -> None:
+    Config.from_env(good_env(ALLOW_INSECURE_HTTP="1"))
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+# ─────────────────────────────────────────────── THE UPLOAD ROOT (5.0.0) ──
+
+
+def test_the_upload_root_is_read_verbatim_and_validated_later() -> None:
+    """Validated by `upload_kb_media`, not here: a deleted upload folder must
+    cost the one tool that reads files, not every tool on the server."""
+    config = Config.from_env(good_env(UPLOAD_ROOT="  ~/does-not-exist-yet  "))
+
+    assert config.upload_root == "~/does-not-exist-yet"
+
+
+@pytest.mark.parametrize("raw", [None, "", "   "])
+def test_an_absent_or_blank_upload_root_means_uploads_are_off(raw: str | None) -> None:
+    env = good_env() if raw is None else good_env(UPLOAD_ROOT=raw)
+
+    assert Config.from_env(env).upload_root is None
+    assert ENV_UPLOAD_ROOT == ENV_PREFIX + "UPLOAD_ROOT"
+
+
+def test_the_repr_shows_the_upload_root_and_still_not_the_token() -> None:
+    rendered = repr(Config.from_env(good_env(UPLOAD_ROOT="/srv/uploads")))
+
+    assert "upload_root='/srv/uploads'" in rendered
+    assert "secret-token-value" not in rendered

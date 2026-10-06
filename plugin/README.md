@@ -193,6 +193,16 @@ would pass — the ordinary minor/major discipline `mcp-server/README.md`
 describes. What changed between the two passes was not the tool surface; it
 was how thoroughly each skill had been read against it.
 
+⚠️ **`ebteqdesk-mcp` 5.0.0 changed response shapes, and the skills were edited
+for it WITHOUT a full re-read.** Text a requester or another third party wrote —
+ticket subjects and bodies, conversation entries, names, filenames, article
+titles, bodies and review notes — now arrives as `{"untrusted_content": "…"}`,
+and `upload_kb_media` reads only inside `EBTEQDESK_UPLOAD_ROOT`. `tickets`,
+`escalations` and `knowledge-base` each gained the paragraph that says so, at
+the point where they name those fields. Their "Verified against" lines still
+say `4.3.0` on purpose: per the rule above, a line moves only after a
+description-level re-read, and this release did not do one.
+
 ## Agent provisioning: nine tools, no skill
 
 `list_agents`, `get_agent`, `list_roles`, `list_groups`, `list_api_keys`

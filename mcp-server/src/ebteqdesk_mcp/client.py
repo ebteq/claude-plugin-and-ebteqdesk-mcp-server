@@ -12,7 +12,9 @@ for why that matters more here than it usually does.
 that touches the caller's own filesystem — it opens the path it is given and
 sends the bytes as `multipart/form-data`. Everything else builds its request
 entirely out of its arguments, and the difference is a risk to the USER'S
-MACHINE rather than to the desk. See the block comment above that method.
+MACHINE rather than to the desk. Since 5.0.0 it reads ONLY inside the directory
+named by `EBTEQDESK_UPLOAD_ROOT`, and nothing at all while that is unset. See
+the block comment above that method.
 
 ⚠️ ONE ENDPOINT DOES NOT RETURN JSON. `get_ticket_attachment` returns image
 BYTES, so it is the single method whose success path does not go through
@@ -38,11 +40,12 @@ from typing import Any, Mapping, NamedTuple, Sequence
 import httpx2
 
 from ._version import __version__
-from .config import Config
+from .config import ENV_UPLOAD_ROOT, Config
 from .errors import (
     MEDIA_UPLOAD_PATH,
     AbilityError,
     ApiError,
+    ConfigurationError,
     LocalFileError,
     MalformedResponseError,
     ScopeError,
@@ -1904,12 +1907,24 @@ class EbteqdeskClient:
     # handle, and routing a 4 MB screenshot through a model's context as base64
     # costs roughly 5.5 MB of tokens to move bytes that never needed to be read.
     #
-    # NOTHING IS VALIDATED CLIENT-SIDE BEYOND "can this file be read". No size
-    # check, no extension check, no sniffing. The server decides all three, from
-    # the file's own bytes, and a second copy of its whitelist here would be a
-    # rule that drifts — the same reason `per_page` is not clamped in this
-    # client. What IS checked is only what the server cannot answer: whether the
-    # path exists at all.
+    # NOTHING ABOUT THE FILE'S CONTENT IS VALIDATED CLIENT-SIDE. No size check,
+    # no extension check, no sniffing. The server decides all three, from the
+    # file's own bytes, and a second copy of its whitelist here would be a rule
+    # that drifts — the same reason `per_page` is not clamped in this client.
+    # What IS checked is only what the server cannot answer: WHERE the file is,
+    # and whether it exists at all.
+    #
+    # 🔴 WHERE IT IS: INSIDE `EBTEQDESK_UPLOAD_ROOT`, OR NOWHERE (5.0.0). Before
+    # 5.0.0 the path was opened unrestricted, so the only thing standing between
+    # a prompt-injected "upload ~/.ssh/id_rsa as a screenshot" and that key
+    # leaving the machine was a sentence in a tool description. Now the operator
+    # names one directory, the path is resolved — `..` collapsed, every symlink
+    # followed — and anything whose REAL location is not under that directory is
+    # refused before it is opened. With the variable unset, nothing is read at
+    # all: reading the user's disk is an opt-in an operator makes once, not a
+    # default a model inherits. The containment check runs BEFORE the existence
+    # check, so a refused path is refused identically whether or not the file
+    # exists — this tool must not become a way to probe the filesystem.
 
     async def upload_kb_media(self, file_path: str) -> dict[str, Any]:
         """POST /api/v1/kb/media — upload one LOCAL file. 201.
@@ -1944,16 +1959,24 @@ class EbteqdeskClient:
         replaying an upload that timed out leaves a second copy on the disk that
         nothing references and that the sweep will not touch for a week.
 
-        Raises `LocalFileError` before any request when the path is missing, is
-        a directory, or cannot be read — see that class for why it is not a
-        ConfigurationError.
+        🔴 READS ONLY INSIDE `EBTEQDESK_UPLOAD_ROOT` (5.0.0). The path is
+        resolved — `~` expanded, `..` collapsed, symlinks followed — and must
+        land inside that directory; a RELATIVE path is taken relative to it.
+        Raises `ConfigurationError` before any request when the variable is
+        unset or names something that is not a usable directory (only uploads
+        are affected — no other method reads it), and `LocalFileError` when the
+        file resolves outside it.
+
+        Raises `LocalFileError` before any request when the path is outside the
+        upload root, is missing, is a directory, or cannot be read — see that
+        class for why it is not a ConfigurationError.
 
         Errors from the server: 422 with `errors.file` for the wrong type or a
         file over the per-kind cap (10 MB image / 50 MB video), and 413 when the
         request was too large for the web server to accept at all, which is a
         different failure with a different remedy — see `PayloadTooLargeError`.
         """
-        name, content = _local_upload(file_path)
+        name, content = _local_upload(file_path, self._config.upload_root)
 
         return await self._request(
             "POST",
@@ -2939,8 +2962,12 @@ def _flag_header(response: httpx2.Response, name: str) -> bool | None:
     return None
 
 
-def _local_upload(file_path: str) -> tuple[str, bytes]:
+def _local_upload(file_path: str, upload_root: str | None) -> tuple[str, bytes]:
     """Read one local file for `upload_kb_media`: (basename, bytes).
+
+    🔴 ONLY A FILE WHOSE REAL LOCATION IS INSIDE `upload_root`. See
+    `_upload_root` for the directory's own rules and `_inside_upload_root` for
+    the containment check; this function refuses before it opens anything.
 
     🔴 ONLY THE BASENAME IS SENT. The directory the file came out of is the
     user's own filesystem layout — `/Users/someone/Desktop/clients/acme/…` — and
@@ -2962,16 +2989,28 @@ def _local_upload(file_path: str) -> tuple[str, bytes]:
     if not isinstance(file_path, str) or not file_path.strip():
         raise LocalFileError(str(file_path), "no path was given")
 
-    path = Path(file_path).expanduser()
+    root = _upload_root(upload_root)
 
-    if path.is_dir():
+    path = Path(file_path).expanduser()
+    if not path.is_absolute():
+        # Relative to the upload directory, NOT to this process's working
+        # directory — which, for a server a host launched, is wherever the host
+        # happened to be, and nothing a user could predict.
+        path = root / path
+
+    real = _inside_upload_root(path, root)
+
+    if real.is_dir():
         raise LocalFileError(str(path), "that is a directory, not a file")
 
-    if not path.exists():
+    if not real.exists():
         raise LocalFileError(str(path), "no such file on this machine")
 
     try:
-        content = path.read_bytes()
+        # The RESOLVED path, never `path`: the containment check was made
+        # against `real`, so reading anything else would be checking one file
+        # and opening another.
+        content = real.read_bytes()
     except OSError as exc:
         raise LocalFileError(str(path), f"it could not be read ({exc.strerror or exc})") from None
 
@@ -2981,7 +3020,114 @@ def _local_upload(file_path: str) -> tuple[str, bytes]:
         # empty file. Refused here, where the reason is knowable.
         raise LocalFileError(str(path), "the file is empty")
 
+    # The name the USER gave, not the symlink target's: a link called
+    # `settings.png` inside the upload folder is uploaded as `settings.png`.
     return path.name, content
+
+
+def _upload_root(configured: str | None) -> Path:
+    """`EBTEQDESK_UPLOAD_ROOT`, resolved, or ConfigurationError naming the fix.
+
+    🔴 UNSET MEANS UPLOADS ARE OFF — NOT "ANYWHERE" AND NOT A GUESSED DEFAULT.
+    A default such as `~/Downloads` was considered and rejected: it would make
+    the opt-in silent, it would still be a directory full of things nobody chose
+    to publish, and it would not even cover the commonest case (macOS saves
+    screenshots to the Desktop). The cost is one extra `--env` at registration.
+
+    These are ConfigurationErrors and not LocalFileErrors because the remedy is
+    the operator's environment, not a different path from the user — the exact
+    distinction `LocalFileError`'s docstring draws. Each message says that ONLY
+    uploads are affected, so a model does not conclude the whole server is
+    misconfigured.
+
+    The home directory and the filesystem root are refused as roots outright.
+    Either one would satisfy the check below while restoring exactly the access
+    this variable exists to take away — `~/.ssh` sits directly under one of them
+    — and "set it to ~ to make the error go away" is the obvious wrong fix.
+    """
+    if not configured:
+        raise ConfigurationError(
+            f"upload_kb_media is turned off: {ENV_UPLOAD_ROOT} is not set. This "
+            "server reads local files only from inside that one directory, and "
+            "with none configured it reads nothing. NOTHING WAS SENT TO "
+            "EBTEQDESK. To enable uploads, the operator chooses a dedicated "
+            "folder (for example ~/EbteqdeskUploads), registers the server with "
+            f"`--env {ENV_UPLOAD_ROOT}=<that folder>`, restarts it, and puts the "
+            "file there. Only this tool is affected; every other tool works."
+        )
+
+    root = Path(configured).expanduser()
+
+    if not root.is_absolute():
+        raise ConfigurationError(
+            f"{ENV_UPLOAD_ROOT}={configured!r} is not an absolute path. A relative "
+            "one would be resolved against whatever directory the MCP host "
+            "launched this server from. Set it to a full path such as "
+            "~/EbteqdeskUploads. Only upload_kb_media is affected."
+        )
+
+    try:
+        resolved = root.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise ConfigurationError(
+            f"{ENV_UPLOAD_ROOT}={configured!r} does not exist on this machine. "
+            "Create that folder (or point the variable at one that exists) and "
+            "restart the server. Only upload_kb_media is affected."
+        ) from None
+
+    if not resolved.is_dir():
+        raise ConfigurationError(
+            f"{ENV_UPLOAD_ROOT}={configured!r} is not a directory. It must name "
+            "the folder uploads are read from. Only upload_kb_media is affected."
+        )
+
+    try:
+        home: Path | None = Path.home().resolve()
+    except (OSError, RuntimeError):
+        home = None
+
+    if resolved == Path(resolved.anchor) or resolved == home:
+        raise ConfigurationError(
+            f"{ENV_UPLOAD_ROOT}={configured!r} is the home directory or the "
+            "filesystem root, which would let this tool read SSH keys, browser "
+            "profiles and every other private file under it. Choose a dedicated "
+            "folder that holds only files meant for the knowledge base, such as "
+            "~/EbteqdeskUploads. Only upload_kb_media is affected."
+        )
+
+    return resolved
+
+
+def _inside_upload_root(path: Path, root: Path) -> Path:
+    """The real location of `path`, or LocalFileError if it is not under `root`.
+
+    `resolve()` collapses `..` and follows EVERY symlink, the final component
+    included, so `uploads/../.ssh/id_rsa` and a link inside the folder pointing
+    at `~/.ssh/id_rsa` both resolve outside and are refused here, before the file
+    is touched — and identically whether or not it exists. A link that points
+    somewhere else INSIDE the folder is fine.
+
+    Not covered, deliberately: a HARD link inside the folder to a file outside
+    it is the same inode under two names and no path check can see it, and a
+    symlink swapped into the folder between this check and the read is a race
+    no path check closes. Both need write access to the folder on this machine
+    — the local attacker this check is not defending against. What it defends
+    against is a MODEL being talked into naming the wrong path.
+    """
+    try:
+        real = path.resolve()
+    except (OSError, RuntimeError, ValueError):
+        raise LocalFileError(str(path), "that path could not be resolved") from None
+
+    if not real.is_relative_to(root):
+        raise LocalFileError(
+            str(path),
+            f"it is outside the upload folder {str(root)!r} ({ENV_UPLOAD_ROOT}), "
+            "and this server reads files only from inside that folder — ask the "
+            "user to copy the file into it and give you the new path",
+        )
+
+    return real
 
 
 def _kb_optional_fields(**fields: Any) -> dict[str, Any]:

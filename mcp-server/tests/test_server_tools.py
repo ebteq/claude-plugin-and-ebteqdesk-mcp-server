@@ -179,6 +179,40 @@ def wired(monkeypatch):
     monkeypatch.setattr(srv, "_client", None)
 
 
+#: 🔴 THE WRITES ANNOTATED `destructiveHint=True` (5.0.0). Conservative on
+#: purpose: anything that removes, overwrites, closes, revokes, creates an
+#: account or a credential, pages a team, or can send mail. The six writes NOT
+#: in this set are purely additive or lose nothing — a private note, a draft,
+#: a new category or folder, a reorder, a media upload. A write moving between
+#: the two halves is a reviewed decision, so the set is asserted whole.
+DESTRUCTIVE_WRITE_NAMES = {
+    "create_ticket",
+    "comment_on_ticket",
+    "escalate_ticket",
+    "de_escalate_ticket",
+    "set_ticket_status",
+    "close_ticket",
+    "update_kb_article",
+    "update_kb_category",
+    "delete_kb_category",
+    "update_kb_folder",
+    "delete_kb_folder",
+    "create_agent",
+    "update_agent",
+    "issue_api_key",
+    "revoke_api_key",
+}
+
+#: 🔴 THE WRITES THAT CAN EMAIL SOMEONE OUTSIDE THE DESK — `openWorldHint=True`.
+#: Exactly the three the server instructions name as the sources of requester
+#: email: a public reply always, and the satisfaction survey on status 4 from
+#: either of the two tools that can set it.
+OPEN_WORLD_WRITE_NAMES = {"comment_on_ticket", "close_ticket", "create_ticket"}
+
+#: The two writes the instructions call safe to retry — and no others.
+IDEMPOTENT_WRITE_NAMES = {"reorder_kb_children", "set_ticket_status"}
+
+
 # --------------------------------------------------------------------------- #
 # Registration
 # --------------------------------------------------------------------------- #
@@ -194,6 +228,98 @@ async def test_exactly_the_forty_two_tools_are_registered(tools) -> None:
     # says. A twenty-second write arriving is what the test below exists to
     # catch.
     assert len(WRITE_TOOL_NAMES) == 21
+
+
+# --------------------------------------------------------------------------- #
+# Tool annotations (5.0.0) — the machine-readable half of "this one writes"
+# --------------------------------------------------------------------------- #
+#
+# Before 5.0.0 no tool carried `ToolAnnotations`, so a host that auto-approves
+# read-only tools or confirms destructive ones had nothing to go on but prose.
+
+
+@pytest.mark.parametrize("name", TOOL_NAMES)
+async def test_every_tool_carries_annotations(tools, name: str) -> None:
+    annotations = tools[name].annotations
+
+    assert annotations is not None, f"{name} has no ToolAnnotations"
+    # Explicit, never left to the spec's defaults — which are `readOnlyHint:
+    # false` and `destructiveHint: true`, i.e. a host reading a missing value
+    # would guess, and the guess is the thing being removed.
+    assert annotations.read_only_hint is not None
+    assert annotations.open_world_hint is not None
+
+
+@pytest.mark.parametrize("name", READ_TOOL_NAMES)
+async def test_every_read_tool_is_annotated_read_only(tools, name: str) -> None:
+    annotations = tools[name].annotations
+
+    assert annotations.read_only_hint is True
+    assert annotations.open_world_hint is False
+
+
+@pytest.mark.parametrize("name", WRITE_TOOL_NAMES)
+async def test_no_write_tool_claims_to_be_read_only(tools, name: str) -> None:
+    """🔴 THE ASSERTION THIS SECTION EXISTS FOR. A write annotated read-only is
+    worse than an unannotated one: a host may auto-approve it."""
+    annotations = tools[name].annotations
+
+    assert annotations.read_only_hint is False
+    # Every write states all three of the write-only hints rather than leaving
+    # any of them to the spec default.
+    assert annotations.destructive_hint is not None
+    assert annotations.idempotent_hint is not None
+    assert annotations.open_world_hint is not None
+
+
+async def test_the_destructive_writes_are_exactly_these(tools) -> None:
+    flagged = {name for name in WRITE_TOOL_NAMES if tools[name].annotations.destructive_hint}
+
+    assert flagged == DESTRUCTIVE_WRITE_NAMES
+    # Including every one of the tools the security review named by hand.
+    assert {
+        "comment_on_ticket",
+        "close_ticket",
+        "set_ticket_status",
+        "create_agent",
+        "update_agent",
+        "issue_api_key",
+        "revoke_api_key",
+        "delete_kb_category",
+        "delete_kb_folder",
+    } <= flagged
+
+
+async def test_only_the_tools_that_can_email_outside_are_open_world(tools) -> None:
+    open_world = {name for name in TOOL_NAMES if tools[name].annotations.open_world_hint}
+
+    assert open_world == OPEN_WORLD_WRITE_NAMES
+
+
+async def test_the_idempotent_hints_match_the_two_retry_safe_writes(tools) -> None:
+    """The instructions name exactly two writes as safe to retry. The hint and
+    the prose must name the same two, or a host and a model disagree about
+    which call may be replayed."""
+    idempotent = {name for name in WRITE_TOOL_NAMES if tools[name].annotations.idempotent_hint}
+
+    assert idempotent == IDEMPOTENT_WRITE_NAMES
+
+    instructions = " ".join((srv.mcp.instructions or "").split())
+    assert "exactly TWO exceptions" in instructions
+    for name in IDEMPOTENT_WRITE_NAMES:
+        assert f"`{name}`" in instructions
+
+
+async def test_the_annotations_serialise_under_their_wire_names(tools) -> None:
+    """camelCase on the wire, which is what a host reads."""
+    wire = tools["revoke_api_key"].model_dump(by_alias=True, exclude_none=True)
+
+    assert wire["annotations"] == {
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    }
 
 
 async def test_the_write_surface_is_exactly_these_twenty_one(tools) -> None:

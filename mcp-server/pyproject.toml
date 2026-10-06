@@ -68,6 +68,21 @@ classifiers = [
 #            is attached. The SDK is built on pydantic v2 and cannot be used
 #            without it, so the floor is the v2 line.
 #
+#   pyjwt    NOT IMPORTED BY THIS PACKAGE, AND THE ONE EXCEPTION TO THE RULE
+#            ABOVE: a SECURITY FLOOR on a transitive dependency, not a declared
+#            import. `mcp` requires `pyjwt[crypto]>=2.10.1`, so a resolver is
+#            free to pick any release from there up — and every release before
+#            2.15.0 carries published advisories (GHSA-2gx3-rcp4-g85q,
+#            GHSA-42vr-xj54-vc7v, GHSA-gvp8-978c-rx2q, GHSA-8wjv-2p76-3863 and
+#            nine more, Sept 2026; 2.15.0 is the first with none). This
+#            server's stdio path never decodes a JWT — `mcp` imports `jwt` only
+#            in its CLIENT-side OAuth extension — so none is reachable here
+#            today. The floor costs nothing and stops a scanner, or a future
+#            SDK code path, from inheriting them. Floor only, no ceiling: this
+#            package has no opinion about pyjwt's API. There is still no
+#            lockfile — see below — so this line is the only place a floor
+#            for an end user's install can live.
+#
 # 🔴 RANGES, NOT EXACT PINS, AND THAT IS A DECISION. An application pins
 # exactly; a library that people `pipx install` alongside other tools must not,
 # because an exact pin turns any co-installed package into a resolver conflict.
@@ -97,6 +112,7 @@ dependencies = [
     "mcp>=2.0,<2.1",
     "httpx2>=2.5,<3",
     "pydantic>=2.7,<3",
+    "pyjwt>=2.15.0",
 ]
 
 # The test suite, and nothing else. No linter and no formatter are declared:
