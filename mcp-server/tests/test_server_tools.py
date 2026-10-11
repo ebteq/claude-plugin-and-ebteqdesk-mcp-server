@@ -73,6 +73,18 @@ READ_TOOL_NAMES = [
     "list_roles",
     "list_groups",
     "list_api_keys",
+    # 🔴 THE FOUR WARNI ACTIVITY READS. They read neither tickets nor
+    # articles nor the roster, but POS BUSINESSES — a daily usage feed pulled from Warni
+    # pushes. All four need `activity:read`, backed by `reports.view`.
+    #
+    # The fifth activity route, `POST /api/v1/activity/daily`, is the POS
+    # ingest and OVERWRITES a day of every business's data. It is deliberately
+    # NOT a tool; anything named like `activity_ingest` / `push_activity`
+    # appearing here or in WRITE_TOOL_NAMES is the failure this roster catches.
+    "activity_list",
+    "activity_summary",
+    "activity_list_dormant",
+    "activity_get_customer",
 ]
 
 #: The three ticket lists share one paging contract server-side (a single
@@ -184,10 +196,12 @@ def wired(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-async def test_exactly_the_forty_two_tools_are_registered(tools) -> None:
+async def test_exactly_the_forty_six_tools_are_registered(tools) -> None:
     assert sorted(tools) == sorted(TOOL_NAMES)
-    assert len(TOOL_NAMES) == 42
-    assert len(READ_TOOL_NAMES) == 21
+    assert len(TOOL_NAMES) == 46
+    # TWENTY-FIVE. Warni Activity took the READ half from 21 to 25 and left
+    # the write half alone — no tool reaches the POS ingest.
+    assert len(READ_TOOL_NAMES) == 25
     # 🔴 TWENTY-ONE. Agent provisioning took the server from 33 to 42, the READ
     # half from 16 to 21 and the WRITE half from 17 to 21 — the first four
     # writes on this server that change WHO MAY ACT rather than what the desk

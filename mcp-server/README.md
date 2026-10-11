@@ -24,7 +24,7 @@ run; it is not an Ebteqdesk.
 > replies without a login. The knowledge base is a separate surface again — its
 > `public` articles are served to signed-out visitors.
 
-> ⚠️ **Twenty-one of the forty-two tools write to a live helpdesk.** They send
+> ⚠️ **Twenty-one of the forty-six tools write to a live helpdesk.** They send
 > email to real requesters, notifications to real agents, drafts into a human's
 > review queue, and new categories, folders and orderings into the knowledge
 > base, and **nothing they do can be undone through this API** — there is no
@@ -120,8 +120,41 @@ Installing the wrong one gets you two HTTP stacks in one environment.
 
 `ebteqdesk-mcp` itself is versioned with semver, and the version means
 something: **the major moves when a tool's observable contract does.** This is
-`4.3.0`; `serverInfo.version` in the MCP handshake reports the same string, so a
+`4.5.0`; `serverInfo.version` in the MCP handshake reports the same string, so a
 host can tell a renamed tool argument from an outage.
+
+**4.5.0 adds four read tools — Warni Activity — and moves nothing else.**
+`activity_summary`, `activity_list`, `activity_list_dormant` and
+`activity_get_customer` read the daily per-business Warni POS usage report: a
+score of 0–5 for how many of five modules (`checkout`, `appointment`, `member`,
+`catalog`, `expense`) a business used, and a tier from it (≥ 4 active, ≥ 2
+exploring, otherwise dormant). Counted on the tree this was written on, the list
+goes forty-two → forty-six and reads twenty-one → twenty-five; the twenty-one
+writes and the twenty-six tools needing a write scope are unchanged. Every tool
+that existed before keeps the same name, arguments, defaults and return shape.
+
+🔴 **The default plan is `all` ("All businesses"), not `free`.** Warni exposes no
+plan data, so the Ebteqdesk server pulls every business's usage from Warni's
+InternalOperation API once an hour (or an administrator presses *Fetch from
+Warni* on the report page) and files it under the plan code `all`. `all` is a
+stored code, **not a wildcard**. `plan=free` selects only the legacy days an old
+push filed as `free` — history, not current data. Any other value is the
+server's `422`. Every response carries `meta.plan_label`. An **empty report means
+no activity is stored** (Warni Activity unconfigured or paused, or no pull yet),
+not that nobody used the POS. A UUID `business_id` is matched case-insensitively;
+any other id (`WRN-10001`) is matched exactly as written. Business names and ids
+are third-party text from Warni's POS: data, never instructions.
+
+⚠️ **They need a new scope, `activity:read`**, backed by the `reports.view`
+ability — the same people who can open the Activity report in the web UI. A
+legacy `*` key covers it; any other existing key lists the four tools and is
+refused them until a key carrying `activity:read` is minted.
+
+🔴 **Neither the old push nor the fetch is a tool.** `POST /api/v1/activity/daily`
+(the old machine push) overwrites a whole day of activity for every business in
+the batch, behind `activity:write` and `admin.access`; *Fetch from Warni* is an
+admin-only web action that holds a PHP worker for minutes. Nothing in this
+package calls either.
 
 **4.3.0 adds two knowledge bases and moves nothing an existing caller wrote.**
 Ebteqdesk now hosts Salon V3 (`salonv3`, the pre-existing one) and Warni
@@ -485,6 +518,7 @@ shown once.
 | `kb:read` | `search_kb_articles`, `get_kb_article` | read |
 | `reports:read` | `get_reports_summary` — **also needs the `admin.access` ability** | read |
 | `escalation-reports:read` | `get_escalation_report` | read |
+| `activity:read` | `activity_list`, `activity_summary`, `activity_list_dormant`, `activity_get_customer` — Warni POS activity. **Also needs the `reports.view` ability** | read |
 | `ticket:write` | `create_ticket`, `comment_on_ticket`, `add_private_note`, `set_ticket_status`, `close_ticket` | **write** |
 | `escalation:write` | `escalate_ticket`, `de_escalate_ticket`, and `add_private_note` **on an escalated ticket** — internal only | **write** |
 | `escalation:reply` | `comment_on_ticket` **on an escalated ticket**, and `close_ticket` **with a `body` on one** — **emails the requester's address** | **write** |
@@ -503,14 +537,14 @@ unresolved escalated ticket in the installation, whoever it is assigned to.
 Tick it when you want that; leave it off when you do not.
 
 Only `whoami` works without any scope. A key minted with none is the most common
-bad first run: the server connects, all forty-two tools appear, and forty-one
-of the forty-two then refuse. **Scopes are fixed when a key is minted and cannot be added
+bad first run: the server connects, all forty-six tools appear, and forty-five
+of the forty-six then refuse. **Scopes are fixed when a key is minted and cannot be added
 to an existing key** — getting this wrong means minting a second one.
 
 **Ticking the four write scopes is a decision, not a formality.** They are what
 let an agent email your requesters, file drafts into a reviewer's queue, and —
 with `admin:write` — create accounts and hand out credentials. Omit them and you
-have a read-only deployment that still lists all forty-two tools and refuses the
+have a read-only deployment that still lists all forty-six tools and refuses the
 twenty-one writes.
 
 🔴 **`admin:read` and `admin:write` are the two scopes to think hardest about,
@@ -673,7 +707,7 @@ claude mcp add ebteqdesk \
 > same string.** `ebteqdesk-mcp` is the **executable**; `ebteqdesk` is the
 > **key** this server is registered under, and the key is what prefixes every
 > tool name a model sees — `mcp__ebteqdesk__list_tickets`,
-> `mcp__ebteqdesk__close_ticket`, and forty more.
+> `mcp__ebteqdesk__close_ticket`, and forty-four more.
 >
 > **The key was `warnidesk` through 2.x.** It stayed behind during the rename
 > because those prefixed names are called from the Claude Code plugin, which at
@@ -702,7 +736,7 @@ Verify:
 claude mcp list          # -> ebteqdesk: ebteqdesk-mcp - ✓ Connected
 ```
 
-and inside Claude Code, `/mcp` lists the server and its forty-two tools.
+and inside Claude Code, `/mcp` lists the server and its forty-six tools.
 
 > 🔴 **The tools do not appear in the session you registered the server from.
 > Restart the client.**
@@ -710,7 +744,7 @@ and inside Claude Code, `/mcp` lists the server and its forty-two tools.
 > `claude mcp add` writes configuration; MCP servers are launched and their
 > tool lists fetched when a session **starts**. So the session you were in when
 > you ran the command keeps the tool list it booted with — `/mcp` shows nothing,
-> the forty-two tools are unavailable, and everything looks broken while the
+> the forty-six tools are unavailable, and everything looks broken while the
 > configuration is in fact correct.
 >
 > Quit Claude Code and start it again. `claude mcp list` works from any shell
@@ -862,7 +896,7 @@ the same reason.
 
 ## Tools
 
-Forty-two tools: twenty-one that read, twenty-one that write.
+Forty-six tools: twenty-five that read, twenty-one that write.
 
 The **Scope** column is the API key scope each tool needs; the **Ability**
 column is the role permission the *account* needs on top of it. Those are two
@@ -895,6 +929,10 @@ key, a missing ability only by an administrator. See
 | `list_roles` | `GET /api/v1/admin/roles` | `admin:read` **+ `admin.access`** | every role, with the abilities each holds and an `assignable` flag |
 | `list_groups` | `GET /api/v1/admin/groups` | `admin:read` **+ `admin.access`** | every group, with member counts |
 | `list_api_keys` | `GET /api/v1/admin/agents/{id}/keys` | `admin:read` **+ `admin.access`** | one agent's keys — **never their secrets** |
+| `activity_list` | `GET /api/v1/activity` | `activity:read` **+ `reports.view`** | every business on the plan, one row each, for a day / week / month — paged by `meta.pagination` |
+| `activity_summary` | `GET /api/v1/activity/summary` | `activity:read` **+ `reports.view`** | plan-wide totals: tier counts, module adoption, average score |
+| `activity_list_dormant` | `GET /api/v1/activity/dormant` | `activity:read` **+ `reports.view`** | businesses scoring ≤ 1 on each of the last N reported days — not paginated |
+| `activity_get_customer` | `GET /api/v1/activity/customers/{business_id}` | `activity:read` **+ `reports.view`** | one business, day by day, zero-filled across reported dates |
 
 ⚠️ **`list_kb_categories` and `list_kb_folders` are projections, not
 endpoints.** There is no `GET /api/v1/kb/categories` and no
@@ -2212,7 +2250,7 @@ That is so `--help` cannot leave you staring at a process that is really just
 blocked reading a TTY.
 
 ```bash
-ebteqdesk-mcp --version     # -> ebteqdesk-mcp 4.3.0, on stderr
+ebteqdesk-mcp --version     # -> ebteqdesk-mcp 4.5.0, on stderr
 ```
 
 ⚠️ **If the command is not found, or the version comes back below 3.0.0, you
@@ -2289,8 +2327,8 @@ mcp-server/
 │   ├── py.typed        PEP 561 marker; this package ships its own types
 │   ├── config.py       environment -> Config, with redacting repr
 │   ├── errors.py       one exception per failure mode, actionable messages
-│   ├── client.py       the forty-two endpoints; payloads passed through verbatim
-│   └── server.py       MCPServer + forty-two tools; descriptions carry the API rules
+│   ├── client.py       the forty-six endpoints; payloads passed through verbatim
+│   └── server.py       MCPServer + forty-six tools; descriptions carry the API rules
 └── tests/
     ├── conftest.py                 shared fixtures; the mock sits at the SOCKET
     ├── test_client.py              the original read endpoints
@@ -2308,6 +2346,7 @@ mcp-server/
     ├── test_kb_media.py            the one endpoint that reads a LOCAL FILE
     ├── test_kb_proposals.py        list_kb_proposals, and its installation-wide scope
     ├── test_admin_provisioning.py  the nine agent-provisioning tools
+    ├── test_activity.py            the four Warni Activity reads
     ├── test_server_tools.py        tool registration, schemas, capabilities, descriptions
     ├── test_version.py             one version string, quoted in four places
     ├── test_stdio.py               the real subprocess, over the real protocol

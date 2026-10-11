@@ -32,8 +32,11 @@ tool call against a curl.
 
 from __future__ import annotations
 
+import datetime
+import re
 from pathlib import Path
 from typing import Any, Mapping, NamedTuple, Sequence
+from urllib.parse import quote
 
 import httpx2
 
@@ -67,6 +70,36 @@ _SNIPPET_BYTES = 200
 #: The identity endpoint. The only v1 route that needs no scope, which is what
 #: makes it usable to diagnose a scope refusal — any valid key can reach it.
 USER_PATH = "/api/v1/user"
+
+#: The Warni Activity vocabulary, copied from App\Reporting\ActivityReport
+#: (`PERIODS`, `SORTS`), App\Reporting\ActivityTiers (`TIERS`, `MAX_SCORE`)
+#: and App\Activity\ActivityInput (the numeric limits). These are CODE
+#: constants on the server and the same for every caller, which is what makes
+#: a local copy safe — see the block comment above `activity_list`.
+ACTIVITY_PERIODS: tuple[str, ...] = ("day", "week", "month")
+ACTIVITY_TIERS: tuple[str, ...] = ("active", "exploring", "dormant")
+ACTIVITY_SORTS: tuple[str, ...] = ("score_desc", "score_asc", "name")
+ACTIVITY_MAX_SCORE = 5
+ACTIVITY_MAX_PER_PAGE = 100
+ACTIVITY_QUERY_MAX = 100
+ACTIVITY_DORMANT_DEFAULT_DAYS = 3
+ACTIVITY_DORMANT_MAX_DAYS = 90
+
+#: The default plan code of every read: `all`, "All businesses". Warni's API
+#: exposes no plan, so the server's hourly pull files every business under it.
+#: NOT a wildcard — it selects rows stored as `all`. The other legal code today
+#: is `free`, the legacy code an old push used; which codes are legal is server
+#: CONFIG (`config('activity.plans')`, first entry = default), so only the
+#: default is copied here and a wrong code comes back as the server's 422.
+ACTIVITY_DEFAULT_PLAN = "all"
+
+#: The route constraint on `{business_id}` — App\Activity\ActivityInput::
+#: BUSINESS_ID_PATTERN, `(?!\.\.?$)[A-Za-z0-9_.-]{1,50}`. Case is NOT checked
+#: or folded here: the server lower-cases a UUID itself and keeps any other id
+#: as written, so the id is sent exactly as given.
+_ACTIVITY_BUSINESS_ID = re.compile(r"[A-Za-z0-9_.-]{1,50}")
+
+_ACTIVITY_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 class AttachmentImage(NamedTuple):
@@ -2490,6 +2523,249 @@ class EbteqdeskClient:
         )
 
     # ------------------------------------------------------------------ #
+    # WARNI ACTIVITY — how much of the POS each business uses
+    # ------------------------------------------------------------------ #
+    #
+    # Four READS over `/api/v1/activity*`, all on the `activity:read` scope,
+    # which is backed by the `reports.view` ability — the same gate as the
+    # /reports/activity web page, so the API and the page admit the same
+    # people. A legacy `*` key covers it.
+    #
+    # 🔴 THE FIFTH ROUTE IS DELIBERATELY NOT HERE. `POST /api/v1/activity/daily`
+    # is the OLD machine push: it OVERWRITES a whole day of activity for every
+    # business in the push, it is backed by `admin.access`, and `*` does not
+    # cover it. It is a system integration's endpoint, not an agent's, and a
+    # method for it here would be one tool registration away from letting a
+    # model rewrite a day of customer data. Do not add one.
+    #
+    # 🔴 NOR IS THE FETCH. The server now PULLS the data from Warni itself, once
+    # an hour; an administrator can also press "Fetch from Warni" on the report
+    # page. That is an admin-only web action holding a PHP worker for minutes
+    # while it walks Warni's whole directory. It has no API route an agent key
+    # could reach, and none should be added for one.
+    #
+    # PLANS. The default is `all` ("All businesses"), a stored code and not a
+    # wildcard; `free` is the legacy code an old push used. Which codes are
+    # legal is server config, so only the shape is checked here and a wrong
+    # code is the server's 422.
+    #
+    # THE SCORE, stated once so every docstring below can refer to it:
+    #
+    #   - Five modules: `checkout`, `appointment`, `member`, `catalog`,
+    #     `expense`. On one day a module scores 1 point if it was used at all
+    #     (count > 0) and 0 otherwise, so a DAILY score is an integer 0..5.
+    #   - Over a week (ISO Mon–Sun) or a calendar month, `points[module]` is
+    #     DAYS USED ÷ DAYS REPORTED (0..1, 2dp) — a share of days, NOT a count
+    #     and NOT a percentage — and `score` is the AVERAGE DAILY SCORE (0..5,
+    #     1dp).
+    #   - Only REPORTED dates count (a date the POS pushed for the plan). A
+    #     business missing on a reported date scores 0 for that day.
+    #   - Tier comes from the ROUNDED score: >= 4 `active`, >= 2 `exploring`,
+    #     otherwise `dormant`.
+    #
+    # VALIDATION. Unlike the ticket lists, these methods DO refuse bad enums and
+    # out-of-range numbers locally. The server's vocabulary here is small,
+    # fixed in code (App\Reporting\ActivityTiers / ActivityReport) rather than
+    # in the database, and identical for every role, so a local copy cannot go
+    # stale per caller the way a role-dependent rule would; and a model reaching
+    # for `tier="inactive"` or `days=365` is better told the legal set before a
+    # round trip than handed a 422. `plan` is the exception: its legal values
+    # are a SERVER CONFIG list (`activity.plans`, today "all" and "free"), so
+    # it is passed through and a wrong one comes back as the server's 422.
+
+    async def activity_list(
+        self,
+        *,
+        period: str = "day",
+        date: str | None = None,
+        plan: str = ACTIVITY_DEFAULT_PLAN,
+        tier: str | None = None,
+        min_score: float | None = None,
+        max_score: float | None = None,
+        query: str | None = None,
+        sort: str | None = None,
+        page: int | None = None,
+        per_page: int | None = None,
+    ) -> dict[str, Any]:
+        """GET /api/v1/activity — one row per business for a day, week or month.
+
+        200 ``{"data": [{"business_id", "business_name", "customer_contact_id",
+        "points": {module: 0..1}, "days_used": {module: n}, "counts": {module:
+        n}, "score", "tier", "days_reported", "days_present",
+        "last_activity_date"}, …], "meta": {"plan", "plan_label", "period", "date", "range":
+        {"from", "to"}, "days_reported", "pagination": {"total", "per_page",
+        "current_page", "last_page"}, "filters": {…}}}``
+
+        `period` is day|week|month; `date` (Y-m-d) is any day inside the period
+        and defaults server-side to the latest reported date. `tier`,
+        `min_score`/`max_score` (0..5, compared against the ROUNDED score) and
+        `query` (business id or name, at most 100 characters, sent as `q`)
+        narrow the set; `sort` is score_desc (the server default) | score_asc
+        | name. `per_page` 1..100, default 25. Pagination is in
+        `meta.pagination`, not a `links` block.
+
+        Requires the `activity:read` scope (backed by `reports.view`).
+        """
+        params: dict[str, Any] = {
+            "period": _activity_choice(period, "period", ACTIVITY_PERIODS),
+            "plan": _activity_plan(plan),
+        }
+
+        if date is not None:
+            params["date"] = _activity_date(date, "date")
+
+        if tier is not None:
+            params["tier"] = _activity_choice(tier, "tier", ACTIVITY_TIERS)
+
+        low = None if min_score is None else _activity_score(min_score, "min_score")
+        high = None if max_score is None else _activity_score(max_score, "max_score")
+
+        if low is not None and high is not None and low > high:
+            raise ValueError(
+                f"min_score ({low}) must not be greater than max_score ({high})."
+            )
+
+        if low is not None:
+            params["min_score"] = low
+
+        if high is not None:
+            params["max_score"] = high
+
+        if query is not None:
+            if not isinstance(query, str):
+                raise ValueError(f"query must be a string, not {query!r}.")
+
+            if len(query) > ACTIVITY_QUERY_MAX:
+                raise ValueError(
+                    f"query must be at most {ACTIVITY_QUERY_MAX} characters, "
+                    f"not {len(query)}."
+                )
+
+            params["q"] = query
+
+        if sort is not None:
+            params["sort"] = _activity_choice(sort, "sort", ACTIVITY_SORTS)
+
+        if page is not None:
+            params["page"] = _activity_int(page, "page", 1, None)
+
+        if per_page is not None:
+            params["per_page"] = _activity_int(
+                per_page, "per_page", 1, ACTIVITY_MAX_PER_PAGE
+            )
+
+        return await self._get("/api/v1/activity", params)
+
+    async def activity_summary(
+        self,
+        *,
+        period: str = "day",
+        date: str | None = None,
+        plan: str = ACTIVITY_DEFAULT_PLAN,
+    ) -> dict[str, Any]:
+        """GET /api/v1/activity/summary — the whole plan's totals for a period.
+
+        200 ``{"data": {"plan", "period", "range", "days_reported",
+        "reported_dates": [...], "customers", "average_score", "tiers":
+        {"active", "exploring", "dormant"}, "modules": {module:
+        {"businesses_used", "rate"}}, "average_points": {module}}, "meta":
+        {"plan", "plan_label", "period", "date"}}``
+
+        `modules.*.rate` is businesses_used ÷ customers (0..1).
+        `average_points` is the mean days-used ratio across businesses.
+
+        Requires the `activity:read` scope (backed by `reports.view`).
+        """
+        params: dict[str, Any] = {
+            "period": _activity_choice(period, "period", ACTIVITY_PERIODS),
+            "plan": _activity_plan(plan),
+        }
+
+        if date is not None:
+            params["date"] = _activity_date(date, "date")
+
+        return await self._get("/api/v1/activity/summary", params)
+
+    async def activity_list_dormant(
+        self,
+        *,
+        days: int = ACTIVITY_DORMANT_DEFAULT_DAYS,
+        as_of: str | None = None,
+        plan: str = ACTIVITY_DEFAULT_PLAN,
+    ) -> dict[str, Any]:
+        """GET /api/v1/activity/dormant — businesses dormant N reported days running.
+
+        A business is returned when its DAILY score was <= 1 on EACH of the last
+        `days` REPORTED dates up to `as_of` (default: the latest reported date).
+        A reported date the business is missing from counts as a 0.
+
+        200 ``{"data": [{"business_id", "business_name", "customer_contact_id",
+        "streak_dates": [...], "streak": [{"date", "score", "present"}, …],
+        "latest": {"date", "plan", "business_name", "customer_contact_id",
+        "counts", "points", "score", "tier"}}, …], "meta": {"plan", "plan_label",
+        "days", "as_of", "total"}}``. NOT paginated.
+
+        `days` is 1..90, default 3.
+
+        Requires the `activity:read` scope (backed by `reports.view`).
+        """
+        params: dict[str, Any] = {
+            "days": _activity_int(days, "days", 1, ACTIVITY_DORMANT_MAX_DAYS),
+            "plan": _activity_plan(plan),
+        }
+
+        if as_of is not None:
+            params["as_of"] = _activity_date(as_of, "as_of")
+
+        return await self._get("/api/v1/activity/dormant", params)
+
+    async def activity_get_customer(
+        self,
+        business_id: str,
+        *,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        plan: str = ACTIVITY_DEFAULT_PLAN,
+    ) -> dict[str, Any]:
+        """GET /api/v1/activity/customers/{business_id} — one business, day by day.
+
+        200 ``{"data": [{"date", "present", "plan", "counts", "points": {module:
+        0|1}, "score", "tier"}, …], "meta": {"business_id", "business_name",
+        "customer_contact_id", "plan", "plan_label", "from", "to", "days_reported",
+        "days_present"}}``
+
+        ZERO-FILLED across REPORTED dates: a reported day the business is
+        missing from is a row with `present: false`, `plan: null` and a score of
+        0 — not an absent row. Days nobody reported are absent entirely.
+
+        `date_from`/`date_to` (Y-m-d, sent as `from`/`to`) default to the 30
+        days ending at the latest reported date; at most 366 days, and a
+        reversed range is the server's 422. 404 when the business has NEVER had
+        a row, for any plan.
+
+        `business_id` must match ``[A-Za-z0-9_.-]{1,50}`` — the route's own
+        constraint — and is percent-encoded into the path regardless.
+        The server matches a UUID id case-insensitively (it stores it lower-case)
+        and any other id, such as ``WRN-10001``, exactly as written; the id is
+        sent as given.
+
+        Requires the `activity:read` scope (backed by `reports.view`).
+        """
+        params: dict[str, Any] = {}
+
+        if date_from is not None:
+            params["from"] = _activity_date(date_from, "date_from")
+
+        if date_to is not None:
+            params["to"] = _activity_date(date_to, "date_to")
+
+        params["plan"] = _activity_plan(plan)
+
+        segment = quote(_activity_business_id(business_id), safe="")
+
+        return await self._get(f"/api/v1/activity/customers/{segment}", params)
+
+    # ------------------------------------------------------------------ #
     # Transport
     # ------------------------------------------------------------------ #
 
@@ -3460,3 +3736,112 @@ def _kb_reference(reference: Any) -> str:
         )
 
     return clean
+
+
+# --------------------------------------------------------------------------- #
+# Warni Activity argument checks
+# --------------------------------------------------------------------------- #
+
+
+def _activity_choice(value: Any, argument: str, allowed: Sequence[str]) -> str:
+    """One of a fixed server vocabulary, or a ValueError listing it."""
+    if not isinstance(value, str) or value not in allowed:
+        raise ValueError(
+            f"{argument} must be one of {', '.join(allowed)}, not {value!r}."
+        )
+
+    return value
+
+
+def _activity_plan(value: Any) -> str:
+    """A non-empty plan name. Which names are LEGAL is server config
+    (`activity.plans`), so only the shape is checked here."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"plan must be a plan code such as 'all' or 'free', not {value!r}."
+        )
+
+    return value.strip()
+
+
+def _activity_date(value: Any, argument: str) -> str:
+    """A real calendar date in the server's `Y-m-d` format.
+
+    Checked because the server's rule is `date_format:Y-m-d` and nothing
+    looser: an ISO date-time that `get_reports_summary` would accept is a 422
+    here, and "2026-02-30" is a 422 too. Saying so before the round trip names
+    the argument the way the caller spelled it (`date_from`, not `from`).
+    """
+    if not isinstance(value, str) or not _ACTIVITY_DATE.fullmatch(value):
+        raise ValueError(
+            f"{argument} must be a date in YYYY-MM-DD form such as '2026-09-29', "
+            f"not {value!r}."
+        )
+
+    try:
+        datetime.date.fromisoformat(value)
+    except ValueError:
+        raise ValueError(
+            f"{argument} is not a real calendar date: {value!r}."
+        ) from None
+
+    return value
+
+
+def _activity_int(value: Any, argument: str, low: int, high: int | None) -> int:
+    """An integer in [low, high] (no ceiling when `high` is None).
+
+    A bool is refused explicitly, for the reason `_ticket_id` gives: `True` is
+    an `int` in Python and would silently become 1.
+    """
+    bounds = f"{low}..{high}" if high is not None else f">= {low}"
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{argument} must be an integer ({bounds}), not {value!r}.")
+
+    if value < low or (high is not None and value > high):
+        raise ValueError(f"{argument} must be {bounds}, not {value}.")
+
+    return value
+
+
+def _activity_score(value: Any, argument: str) -> int | float:
+    """A score bound on 0..5. Scores are 1dp floats, so a float is legal."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(
+            f"{argument} must be a number from 0 to {ACTIVITY_MAX_SCORE}, "
+            f"not {value!r}."
+        )
+
+    if not 0 <= value <= ACTIVITY_MAX_SCORE:
+        raise ValueError(
+            f"{argument} must be from 0 to {ACTIVITY_MAX_SCORE} — the score is "
+            f"the number of the five modules used — not {value}."
+        )
+
+    return value
+
+
+def _activity_business_id(value: Any) -> str:
+    """A business id the route will match, or a ValueError.
+
+    The route constrains `{business_id}` to ``[A-Za-z0-9_.-]{1,50}``, and a
+    value outside it does not reach the controller at all: it falls through to
+    a routing miss, which renders as an HTML 404 and would be reported as a
+    proxy problem. `.` and `..` match the pattern but are PATH SEGMENTS to
+    every URL normaliser between here and Laravel — `customers/..` would
+    resolve to a different route entirely — so they are refused too.
+    """
+    rule = (
+        "business_id must be the POS business id — 1 to 50 letters, digits, "
+        "'_', '.' or '-' — as returned in `business_id` by `activity_list` "
+        "or `activity_list_dormant`"
+    )
+
+    if not isinstance(value, str) or not _ACTIVITY_BUSINESS_ID.fullmatch(value):
+        raise ValueError(f"{rule}, not {value!r}.")
+
+    if value in (".", ".."):
+        raise ValueError(f"{rule}; {value!r} is a path segment, not an id.")
+
+    return value
