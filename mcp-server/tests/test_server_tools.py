@@ -42,8 +42,8 @@ READ_TOOL_NAMES = [
     # `list_kb_proposals` have the write corpus — every article including
     # drafts; the three structure reads return the AUTHORING view — ids and
     # `agents`-only folders. Counting scopes and counting consequences give
-    # different answers, and these are the tools where they differ: TWENTY-TWO
-    # tools need a write scope, SEVENTEEN change state.
+    # different answers, and these are the tools where they differ:
+    # TWENTY-SEVEN tools need a write scope, TWENTY-TWO change state.
     "get_kb_article_review",
     # 🔴 THE ONLY READ ON THIS SERVER THAT ENUMERATES DRAFTS, and the second
     # tool after `list_escalations` whose corpus is the whole INSTALLATION
@@ -106,12 +106,16 @@ WRITE_TOOL_NAMES = [
     "add_private_note",
     "escalate_ticket",
     "de_escalate_ticket",
-    # The WORKING-STATE change, and the only write on this server that emails
+    # The WORKING-STATE change, and one of the two ticket writes that email
     # nobody. It sits between de-escalate and close because that is where it
-    # sits in server.py, and because the pair below it — this and close_ticket —
-    # split the status vocabulary between them with no overlap: 1/2/3/8 here,
-    # 4/5 there, and neither can reach the other's.
+    # sits in server.py, and because it and close_ticket split the status
+    # vocabulary between them with no overlap: 1/2/3/8 here, 4/5 there, and
+    # neither can reach the other's.
     "set_ticket_status",
+    # The TYPE change (Ebteqdesk PR #261), and the other quiet ticket write —
+    # quieter still, because it leaves no history entry at all. Takes a slug or
+    # null, and null CLEARS the type, which is why `category` has no default.
+    "set_ticket_category",
     "close_ticket",
     "propose_kb_article",
     "update_kb_article",
@@ -191,26 +195,157 @@ def wired(monkeypatch):
     monkeypatch.setattr(srv, "_client", None)
 
 
+#: 🔴 THE WRITES ANNOTATED `destructiveHint=True` (5.0.0). Conservative on
+#: purpose: anything that removes, overwrites, closes, revokes, creates an
+#: account or a credential, pages a team, or can send mail. The six writes NOT
+#: in this set are purely additive or lose nothing — a private note, a draft,
+#: a new category or folder, a reorder, a media upload. A write moving between
+#: the two halves is a reviewed decision, so the set is asserted whole.
+DESTRUCTIVE_WRITE_NAMES = {
+    "create_ticket",
+    "comment_on_ticket",
+    "escalate_ticket",
+    "de_escalate_ticket",
+    "set_ticket_status",
+    "set_ticket_category",
+    "close_ticket",
+    "update_kb_article",
+    "update_kb_category",
+    "delete_kb_category",
+    "update_kb_folder",
+    "delete_kb_folder",
+    "create_agent",
+    "update_agent",
+    "issue_api_key",
+    "revoke_api_key",
+}
+
+#: 🔴 THE WRITES THAT CAN EMAIL SOMEONE OUTSIDE THE DESK — `openWorldHint=True`.
+#: Exactly the three the server instructions name as the sources of requester
+#: email: a public reply always, and the satisfaction survey on status 4 from
+#: either of the two tools that can set it.
+OPEN_WORLD_WRITE_NAMES = {"comment_on_ticket", "close_ticket", "create_ticket"}
+
+#: The three writes the instructions call safe to retry — and no others.
+IDEMPOTENT_WRITE_NAMES = {
+    "reorder_kb_children",
+    "set_ticket_status",
+    "set_ticket_category",
+}
+
+
 # --------------------------------------------------------------------------- #
 # Registration
 # --------------------------------------------------------------------------- #
 
 
-async def test_exactly_the_forty_six_tools_are_registered(tools) -> None:
+async def test_exactly_the_forty_seven_tools_are_registered(tools) -> None:
     assert sorted(tools) == sorted(TOOL_NAMES)
-    assert len(TOOL_NAMES) == 46
+    assert len(TOOL_NAMES) == 47
     # TWENTY-FIVE. Warni Activity took the READ half from 21 to 25 and left
     # the write half alone — no tool reaches the POS ingest.
     assert len(READ_TOOL_NAMES) == 25
-    # 🔴 TWENTY-ONE. Agent provisioning took the server from 33 to 42, the READ
+    # 🔴 TWENTY-TWO. Agent provisioning took the server from 33 to 42, the READ
     # half from 16 to 21 and the WRITE half from 17 to 21 — the first four
     # writes on this server that change WHO MAY ACT rather than what the desk
-    # says. A twenty-second write arriving is what the test below exists to
-    # catch.
-    assert len(WRITE_TOOL_NAMES) == 21
+    # says. 4.4.0's `set_ticket_category` made it 43 and 22. A twenty-third
+    # write arriving is what the test below exists to catch.
+    assert len(WRITE_TOOL_NAMES) == 22
 
 
-async def test_the_write_surface_is_exactly_these_twenty_one(tools) -> None:
+# --------------------------------------------------------------------------- #
+# Tool annotations (5.0.0) — the machine-readable half of "this one writes"
+# --------------------------------------------------------------------------- #
+#
+# Before 5.0.0 no tool carried `ToolAnnotations`, so a host that auto-approves
+# read-only tools or confirms destructive ones had nothing to go on but prose.
+
+
+@pytest.mark.parametrize("name", TOOL_NAMES)
+async def test_every_tool_carries_annotations(tools, name: str) -> None:
+    annotations = tools[name].annotations
+
+    assert annotations is not None, f"{name} has no ToolAnnotations"
+    # Explicit, never left to the spec's defaults — which are `readOnlyHint:
+    # false` and `destructiveHint: true`, i.e. a host reading a missing value
+    # would guess, and the guess is the thing being removed.
+    assert annotations.read_only_hint is not None
+    assert annotations.open_world_hint is not None
+
+
+@pytest.mark.parametrize("name", READ_TOOL_NAMES)
+async def test_every_read_tool_is_annotated_read_only(tools, name: str) -> None:
+    annotations = tools[name].annotations
+
+    assert annotations.read_only_hint is True
+    assert annotations.open_world_hint is False
+
+
+@pytest.mark.parametrize("name", WRITE_TOOL_NAMES)
+async def test_no_write_tool_claims_to_be_read_only(tools, name: str) -> None:
+    """🔴 THE ASSERTION THIS SECTION EXISTS FOR. A write annotated read-only is
+    worse than an unannotated one: a host may auto-approve it."""
+    annotations = tools[name].annotations
+
+    assert annotations.read_only_hint is False
+    # Every write states all three of the write-only hints rather than leaving
+    # any of them to the spec default.
+    assert annotations.destructive_hint is not None
+    assert annotations.idempotent_hint is not None
+    assert annotations.open_world_hint is not None
+
+
+async def test_the_destructive_writes_are_exactly_these(tools) -> None:
+    flagged = {name for name in WRITE_TOOL_NAMES if tools[name].annotations.destructive_hint}
+
+    assert flagged == DESTRUCTIVE_WRITE_NAMES
+    # Including every one of the tools the security review named by hand.
+    assert {
+        "comment_on_ticket",
+        "close_ticket",
+        "set_ticket_status",
+        "create_agent",
+        "update_agent",
+        "issue_api_key",
+        "revoke_api_key",
+        "delete_kb_category",
+        "delete_kb_folder",
+    } <= flagged
+
+
+async def test_only_the_tools_that_can_email_outside_are_open_world(tools) -> None:
+    open_world = {name for name in TOOL_NAMES if tools[name].annotations.open_world_hint}
+
+    assert open_world == OPEN_WORLD_WRITE_NAMES
+
+
+async def test_the_idempotent_hints_match_the_three_retry_safe_writes(tools) -> None:
+    """The instructions name exactly three writes as safe to retry. The hint and
+    the prose must name the same three, or a host and a model disagree about
+    which call may be replayed."""
+    idempotent = {name for name in WRITE_TOOL_NAMES if tools[name].annotations.idempotent_hint}
+
+    assert idempotent == IDEMPOTENT_WRITE_NAMES
+
+    instructions = " ".join((srv.mcp.instructions or "").split())
+    assert "exactly THREE exceptions" in instructions
+    for name in IDEMPOTENT_WRITE_NAMES:
+        assert f"`{name}`" in instructions
+
+
+async def test_the_annotations_serialise_under_their_wire_names(tools) -> None:
+    """camelCase on the wire, which is what a host reads."""
+    wire = tools["revoke_api_key"].model_dump(by_alias=True, exclude_none=True)
+
+    assert wire["annotations"] == {
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    }
+
+
+async def test_the_write_surface_is_exactly_these_twenty_two(tools) -> None:
     """This list was empty until the write endpoints landed, and the test that
     asserted it stay empty was the read-only guard. It is replaced rather than
     deleted: the point was never "no writes", it was that a write tool must be a
@@ -280,6 +415,10 @@ async def test_argument_schemas(tools) -> None:
     assert set(props("escalate_ticket")) == {"ticket_id"}
     assert set(props("de_escalate_ticket")) == {"ticket_id"}
     assert set(props("set_ticket_status")) == {"ticket_id", "status"}
+    # A slug or null, and nothing else — no `type`, no `ticket_type_id`, no
+    # name: the server refuses every alias, so offering one would be offering
+    # a guaranteed 422.
+    assert set(props("set_ticket_category")) == {"ticket_id", "category"}
     assert set(props("close_ticket")) == {"ticket_id", "status"}
 
     # ONE tool over three endpoints. `scope` is the discriminator and is a
@@ -352,6 +491,11 @@ async def test_only_the_genuinely_required_arguments_are_required(tools) -> None
     # tool-side default would have to pick one of four working states on the
     # caller's behalf with no way to be right.
     assert required("set_ticket_status") == {"ticket_id", "status"}
+    # 🔴 `category` IS REQUIRED EVEN THOUGH null IS LEGAL. null CLEARS the type,
+    # so a default of null would make clearing the consequence of a forgotten
+    # argument — the NO-DEFAULT-CARRIES-THE-BIGGER-EFFECT rule close_ticket was
+    # fixed for.
+    assert required("set_ticket_category") == {"ticket_id", "category"}
     assert required("close_ticket") == {"ticket_id"}
 
     # ⚠️ `parent_id` is optional in the SCHEMA and conditionally mandatory in
@@ -512,6 +656,11 @@ async def test_each_tool_names_the_scope_it_needs(tools) -> None:
         in described(tools["set_ticket_status"])
     )
     assert "`ticket:write`" in described(tools["close_ticket"])
+    assert "`ticket:write`" in described(tools["set_ticket_category"])
+    assert (
+        "`ticket:write` is the whole scope requirement"
+        in described(tools["set_ticket_category"])
+    )
 
     # The KB structure tools, reads and write alike, are `kb:write` — the tree
     # is the AUTHORING view. `kb:read` gates the public corpus and must not
@@ -544,6 +693,7 @@ async def test_each_write_tool_also_names_the_ability_it_needs(tools) -> None:
     assert "`ticket.reply`" in described(tools["set_ticket_status"])
     assert "`ticket.close`" in described(tools["set_ticket_status"])
     assert "`ticket.close`" in described(tools["close_ticket"])
+    assert "`ticket.reply`" in described(tools["set_ticket_category"])
 
 
 # --------------------------------------------------------------------------- #
@@ -898,13 +1048,17 @@ async def test_the_instructions_split_the_status_vocabulary_between_the_two_tool
     assert "`ticket.close`" in instructions
 
 
-async def test_the_instructions_name_both_retry_safe_writes(tools) -> None:
-    """It was ONE for four releases and the instructions said so twice. A count
-    that moves in one sentence and not the other is worse than no count."""
+async def test_the_instructions_name_all_three_retry_safe_writes(tools) -> None:
+    """It was ONE for four releases, then TWO, and the instructions say so
+    twice. A count that moves in one sentence and not the other is worse than
+    no count — so both sentences are pinned, and both old counts are pinned
+    ABSENT."""
     instructions = " ".join((srv.mcp.instructions or "").split())
 
-    assert "exactly TWO exceptions" in instructions
-    assert "only TWO writes here that are safe to retry" in instructions
+    assert "exactly THREE exceptions" in instructions
+    assert "only THREE writes here that are safe to retry" in instructions
+    assert "exactly TWO exceptions" not in instructions
+    assert "only TWO writes here that are safe to retry" not in instructions
     assert "ONE write here that is safe to retry" not in instructions
 
 
@@ -1057,6 +1211,7 @@ WRITE_CALLS = [
     ("escalate_ticket", {"ticket_id": 42}),
     ("de_escalate_ticket", {"ticket_id": 42}),
     ("set_ticket_status", {"ticket_id": 42, "status": 2}),
+    ("set_ticket_category", {"ticket_id": 42, "category": "admin"}),
     ("close_ticket", {"ticket_id": 42}),
 ]
 
@@ -1566,3 +1721,171 @@ async def test_the_server_instructions_name_every_source_of_requester_email(tool
     assert "OUTBOUND EMAIL TO THE REQUESTER COMES FROM THREE PLACES AND NO DEFAULT TRIGGERS ONE" in instructions
     assert "`comment_on_ticket`" in instructions
     assert "`close_ticket` mails only when asked for `status: 4`" in instructions
+
+
+# --------------------------------------------------------------------------- #
+# set_ticket_category (4.4.0, Ebteqdesk PR #261)
+# --------------------------------------------------------------------------- #
+#
+# The docstring is the contract a model reads, so each clause the brief for
+# this tool requires is pinned here: the scope, the ownership rule, the return
+# shape, null clears, no mail and no history, the 422s, the slug-less type, and
+# the older-server 404/405.
+
+
+async def test_the_category_tool_leads_with_the_fact_that_it_mails_nobody(tools) -> None:
+    first_line = (tools["set_ticket_category"].description or "").strip().splitlines()[0]
+
+    assert first_line.startswith("WRITES TO EBTEQDESK")
+    assert "Emails nobody" in first_line
+    assert "type" in first_line
+
+
+async def test_the_category_tool_states_every_clause_of_its_contract(tools) -> None:
+    description = described(tools["set_ticket_category"])
+
+    # Scope and ability.
+    assert "`ticket:write`" in description
+    assert "`ticket.reply`" in description
+    assert "`required_scope`" in description
+    assert "`required_ability`" in description
+    # Ownership.
+    assert "WRITES ONLY TO TICKETS ASSIGNED TO YOUR OWN ACCOUNT" in description
+    assert "ticket_not_assigned" in description
+    # Return shape.
+    assert 'Returns 200 `{"data": {...}}`' in description
+    assert "`{slug, name}`" in description
+    # null clears.
+    assert "`category=null` CLEARS THE TYPE" in description
+    # No mail, no history.
+    assert "sends no mail to the requester" in description
+    assert "NO HISTORY ENTRY" in description
+    assert "read it off the ticket BEFORE calling this" in description
+    # The refusals.
+    assert "a slug no ticket type carries" in description
+    assert "RETIRED (soft-deleted)" in description
+    assert "422" in description
+    assert "NO slug at all cannot be set" in description
+    # Older servers.
+    assert "PR #261" in description
+    assert "404 or 405" in description
+    assert "do not report the ticket as missing" in description
+
+
+async def test_the_category_tool_says_the_no_op_is_safe_to_retry(tools) -> None:
+    description = described(tools["set_ticket_category"])
+
+    assert "THE NO-OP IS SAFE" in description
+    assert "still answers 200" in description
+
+
+async def test_the_category_schema_is_a_required_nullable_string(tools) -> None:
+    """null is a legal VALUE and still not a default: omitting the argument is
+    refused by the schema, so clearing a type is always something asked for."""
+    schema = tools["set_ticket_category"].input_schema
+
+    assert "category" in schema["required"]
+    assert schema["properties"]["category"]["type"] == ["string", "null"]
+    assert "default" not in schema["properties"]["category"]
+    assert "CLEAR" in schema["properties"]["category"]["description"]
+
+
+async def test_setting_a_category_sends_the_slug_under_the_key_category(wired) -> None:
+    recorder: list = []
+    payload = ticket_payload(category={"slug": "admin", "name": "Admin"})
+    wired(lambda request: (recorder.append(request), json_response(200, payload))[1])
+
+    result = await srv.mcp.call_tool(
+        "set_ticket_category", {"ticket_id": 42, "category": "admin"}
+    )
+
+    assert not result.is_error
+    assert recorder[0].method == "PUT"
+    assert recorder[0].url.path == "/api/v1/tickets/42/category"
+    assert jsonlib.loads(recorder[0].content) == {"category": "admin"}
+    # 5.0.0: the receipt is a ticket, so its third-party text is enveloped and
+    # nothing else moves — `category` is a staff-curated label, left as sent.
+    assert result.structured_content["data"]["id"] == payload["data"]["id"]
+    assert result.structured_content["data"]["category"] == {"slug": "admin", "name": "Admin"}
+    assert result.structured_content["data"]["subject"] == {
+        "untrusted_content": payload["data"]["subject"]
+    }
+
+
+async def test_null_is_sent_as_an_explicit_null_and_clears_the_type(wired) -> None:
+    """🔴 The key must be SENT. `create_ticket` drops a None optional from the
+    body; doing that here would turn "clear the type" into a 422 for a missing
+    key."""
+    recorder: list = []
+    payload = ticket_payload(category=None)
+    wired(lambda request: (recorder.append(request), json_response(200, payload))[1])
+
+    result = await srv.mcp.call_tool(
+        "set_ticket_category", {"ticket_id": 42, "category": None}
+    )
+
+    assert jsonlib.loads(recorder[0].content) == {"category": None}
+    assert result.structured_content["data"]["category"] is None
+
+
+async def test_omitting_category_is_refused_before_any_request(wired) -> None:
+    sent: list = []
+    wired(lambda request: (sent.append(request), json_response(200, ticket_payload()))[1])
+
+    with pytest.raises(ToolError):
+        await srv.mcp.call_tool("set_ticket_category", {"ticket_id": 42})
+
+    assert sent == []
+
+
+async def test_a_blank_category_is_refused_as_prose_not_sent_as_a_clear(wired) -> None:
+    sent: list = []
+    wired(lambda request: (sent.append(request), json_response(200, ticket_payload()))[1])
+
+    with pytest.raises(ToolError) as excinfo:
+        await srv.mcp.call_tool("set_ticket_category", {"ticket_id": 42, "category": "  "})
+
+    assert "None to clear" in str(excinfo.value)
+    assert sent == []
+
+
+async def test_an_unknown_category_reaches_the_client_as_the_field_error(wired) -> None:
+    wired(
+        always_json(
+            422,
+            {
+                "error": "The given data was invalid.",
+                "errors": {"category": ['There is no ticket category with the slug "nope".']},
+            },
+        )
+    )
+
+    with pytest.raises(ToolError) as excinfo:
+        await srv.mcp.call_tool("set_ticket_category", {"ticket_id": 42, "category": "nope"})
+
+    text = str(excinfo.value)
+    assert "422" in text
+    assert "category" in text
+    assert "nope" in text
+
+
+async def test_the_create_tool_says_category_is_the_only_way_to_set_the_type(tools) -> None:
+    """The server now refuses the alias keys on POST /tickets. The tool offers
+    none of them — the schema assertion above pins that — and the description
+    has to say so, or a model reaching for `type` learns it from a 422."""
+    description = described(tools["create_ticket"])
+
+    assert "the ONLY way to set the type on create" in description
+    assert "`type`, `ticket_type` or `ticket_type_id`" in description
+    assert "`set_ticket_category`" in description
+
+    properties = set(tools["create_ticket"].input_schema["properties"])
+    assert not properties & {"type", "ticket_type", "ticket_type_id"}
+
+
+async def test_the_instructions_describe_the_type_write(tools) -> None:
+    instructions = " ".join((srv.mcp.instructions or "").split())
+
+    assert "`set_ticket_category` takes a ticket-type SLUG, or null to clear it" in instructions
+    assert "leaves NO history entry" in instructions
+    assert "`type`, `ticket_type` and `ticket_type_id` are refused" in instructions

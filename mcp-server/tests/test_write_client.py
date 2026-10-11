@@ -85,6 +85,12 @@ def body_of(request: httpx2.Request) -> dict:
             "PUT",
             "/api/v1/tickets/42/status",
         ),
+        # PUT again, for the same reason: the route is declared PUT.
+        (
+            lambda c: c.set_ticket_category(42, category="admin"),
+            "PUT",
+            "/api/v1/tickets/42/category",
+        ),
         (lambda c: c.close_ticket(42), "POST", "/api/v1/tickets/42/close"),
     ],
 )
@@ -374,6 +380,7 @@ async def test_a_ticket_id_that_is_not_a_positive_int_is_refused_before_sending(
         lambda c: c.escalate_ticket("x"),
         lambda c: c.de_escalate_ticket("x"),
         lambda c: c.set_ticket_status("x", status=2),
+        lambda c: c.set_ticket_category("x", category="admin"),
         lambda c: c.close_ticket("x"),
     ],
 )
@@ -938,6 +945,7 @@ async def test_a_rate_limited_write_is_not_retried(make_client) -> None:
         lambda c: c.escalate_ticket(4),
         lambda c: c.de_escalate_ticket(4),
         lambda c: c.set_ticket_status(4, status=2),
+        lambda c: c.set_ticket_category(4, category="admin"),
         lambda c: c.close_ticket(4),
     ],
 )
@@ -974,3 +982,183 @@ async def test_the_ownership_403_on_a_comment_is_not_rewritten_as_an_escalation_
 
     assert "THIS TICKET IS ESCALATED" not in text
     assert "escalation:write" not in text
+
+
+# --------------------------------------------------------------------------- #
+# set_ticket_category — PUT /api/v1/tickets/{id}/category (Ebteqdesk PR #261)
+# --------------------------------------------------------------------------- #
+
+
+async def test_set_ticket_category_sends_the_slug_under_the_key_category(
+    make_client,
+) -> None:
+    client, recorder = make_client(OK)
+
+    async with client:
+        await client.set_ticket_category(42, category="admin")
+
+    assert body_of(recorder.last) == {"category": "admin"}
+    assert len(recorder.requests) == 1
+
+
+async def test_clearing_the_category_sends_an_explicit_null(make_client) -> None:
+    """🔴 The key is SENT as null, never dropped. `create_ticket` omits a None
+    optional so the server applies its default; the server REQUIRES this key,
+    so omitting it would turn "clear the type" into a 422."""
+    client, recorder = make_client(OK)
+
+    async with client:
+        await client.set_ticket_category(42, category=None)
+
+    assert body_of(recorder.last) == {"category": None}
+    assert recorder.last.method == "PUT"
+    assert recorder.last.url.path == "/api/v1/tickets/42/category"
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t"])
+async def test_a_blank_category_is_refused_before_sending(make_client, blank) -> None:
+    """Laravel's TrimStrings + ConvertEmptyStringsToNull run on JSON bodies, so
+    a blank string would arrive as null and CLEAR the type. Clearing must be
+    asked for with None."""
+    client, recorder = make_client(OK)
+
+    async with client:
+        with pytest.raises(ValueError, match="None to clear"):
+            await client.set_ticket_category(42, category=blank)
+
+    assert recorder.requests == []
+
+
+async def test_the_category_200_is_returned_verbatim(make_client) -> None:
+    payload = ticket_payload(category={"slug": "admin", "name": "Admin"})
+    client, _ = make_client(always_json(200, payload))
+
+    async with client:
+        result = await client.set_ticket_category(42, category="admin")
+
+    assert result == payload
+    assert "comment" not in result
+
+
+async def test_a_cleared_category_comes_back_as_null(make_client) -> None:
+    payload = ticket_payload(category=None)
+    client, _ = make_client(always_json(200, payload))
+
+    async with client:
+        result = await client.set_ticket_category(42, category=None)
+
+    assert result["data"]["category"] is None
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        'There is no ticket category with the slug "nope".',
+        # A soft-deleted (retired) type: same field, same status.
+        'The ticket category "legacy" has been retired and cannot be set.',
+    ],
+)
+async def test_an_unknown_or_retired_slug_is_a_422_on_category(
+    make_client, message: str
+) -> None:
+    """Passed through for the server to refuse — the server's list of types is
+    the only list — and surfaced as the field error it is."""
+    client, recorder = make_client(
+        always_json(
+            422,
+            {"error": "The given data was invalid.", "errors": {"category": [message]}},
+        )
+    )
+
+    async with client:
+        with pytest.raises(InvalidRequestError) as excinfo:
+            await client.set_ticket_category(42, category="nope")
+
+    assert set(excinfo.value.field_errors) == {"category"}
+    assert message in str(excinfo.value)
+    assert len(recorder.requests) == 1
+
+
+async def test_a_category_scope_refusal_is_diagnosed_like_every_write(
+    make_client,
+) -> None:
+    client, recorder = make_client(
+        scope_refusal("ticket:write", requested=["ticket:read"], scopes=["ticket:read"])
+    )
+
+    async with client:
+        with pytest.raises(KeyScopeError) as excinfo:
+            await client.set_ticket_category(42, category="admin")
+
+    assert excinfo.value.required_scope == "ticket:write"
+    # No escalated-ticket rewording: this endpoint's scope does not grow on an
+    # escalated ticket, so there is nothing to explain.
+    assert "ESCALATED" not in str(excinfo.value)
+    assert recorder.paths == ["/api/v1/tickets/42/category", "/api/v1/user"]
+
+
+async def test_a_category_ability_refusal_names_the_ability(make_client) -> None:
+    client, _ = make_client(ability_refusal("ticket.reply"))
+
+    async with client:
+        with pytest.raises(AbilityError) as excinfo:
+            await client.set_ticket_category(42, category="admin")
+
+    assert excinfo.value.required_ability == "ticket.reply"
+    assert not isinstance(excinfo.value, ScopeError)
+
+
+async def test_a_category_404_is_a_not_found_and_is_not_retried(make_client) -> None:
+    """Covers the ownership 404 AND an older server with no such route; the
+    two are the same status and this client does not parse prose to split
+    them. The tool description tells the model about the second."""
+    client, recorder = make_client(
+        always_json(404, {"error": 'There is no ticket with the id "42".'})
+    )
+
+    async with client:
+        with pytest.raises(NotFoundError):
+            await client.set_ticket_category(42, category="admin")
+
+    # The write itself, then at most the one diagnostic GET — never a retry.
+    assert recorder.paths.count("/api/v1/tickets/42/category") == 1
+
+
+async def test_a_category_405_from_an_older_server_is_an_api_error_naming_the_path(
+    make_client,
+) -> None:
+    """No 405 class exists and none is added: the generic fallthrough already
+    names the status and the path, and the tool description says what a 405
+    from THIS tool means."""
+    from ebteqdesk_mcp.errors import ApiError
+
+    client, recorder = make_client(
+        always_json(405, {"message": "The PUT method is not supported for route."})
+    )
+
+    async with client:
+        with pytest.raises(ApiError) as excinfo:
+            await client.set_ticket_category(42, category="admin")
+
+    assert excinfo.value.status_code == 405
+    assert "/api/v1/tickets/42/category" in str(excinfo.value)
+    assert len(recorder.requests) == 1
+
+
+async def test_create_never_sends_a_type_alias(make_client) -> None:
+    """The server now 422s `type`, `ticket_type` and `ticket_type_id` on
+    create. This client has no parameter for any of them; `category` is the
+    only key the type travels under."""
+    client, recorder = make_client(CREATED)
+
+    async with client:
+        await client.create_ticket(
+            subject="Printer on fire",
+            description="It is.",
+            requester={"id": 1},
+            category="admin",
+        )
+
+    body = body_of(recorder.last)
+    assert body["category"] == "admin"
+    assert not set(body) & {"type", "ticket_type", "ticket_type_id"}

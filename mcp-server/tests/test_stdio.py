@@ -64,11 +64,14 @@ EXPECTED_TOOLS = {
     "add_private_note",
     "escalate_ticket",
     "de_escalate_ticket",
-    # The only write on this server that emails nobody. Over the wire as well
+    # One of the two ticket writes that email nobody. Over the wire as well
     # as in-process: it and `close_ticket` split the status vocabulary between
     # them, and a client served only one of the pair would be able to resolve a
     # ticket and never reopen it.
     "set_ticket_status",
+    # The other quiet ticket write (4.4.0): sets or clears the ticket TYPE by
+    # slug, and leaves no history entry at all.
+    "set_ticket_category",
     "close_ticket",
     "propose_kb_article",
     "update_kb_article",
@@ -131,9 +134,19 @@ def _params(**env: str) -> StdioServerParameters:
 
 
 def _path() -> str:
+    """The subprocess PATH, with THIS interpreter's scripts directory first.
+
+    🔴 Without that, `ebteqdesk-mcp` resolves to whatever is first on the
+    developer's PATH — typically a `uv tool`/`pipx` install of an OLDER release
+    — and this whole module silently tests that binary instead of the code
+    under test. Found during 5.0.0: run without the venv activated, these tests
+    were driving an installed 4.3.0 and passing.
+    """
     import os
 
-    return os.environ.get("PATH", "")
+    scripts = os.path.dirname(sys.executable)
+
+    return os.pathsep.join([scripts, os.environ.get("PATH", "")])
 
 
 async def test_the_subprocess_completes_the_handshake_and_lists_every_tool() -> None:
@@ -164,6 +177,72 @@ async def test_the_handshake_advertises_tools_and_nothing_else() -> None:
     assert init.capabilities.tools is not None
     assert init.capabilities.prompts is None
     assert init.capabilities.resources is None
+
+
+async def test_the_tool_annotations_reach_a_real_client(  # 5.0.0
+) -> None:
+    """In-process tests prove what was registered; this proves what a host
+    actually reads out of `tools/list` — the hints it would gate approval on."""
+    async with stdio_client(_params(EBTEQDESK_BASE_URL=UNREACHABLE)) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            tools = {tool.name: tool for tool in (await session.list_tools()).tools}
+
+    assert all(tool.annotations is not None for tool in tools.values())
+    assert tools["get_ticket"].annotations.read_only_hint is True
+    assert tools["comment_on_ticket"].annotations.read_only_hint is False
+    assert tools["comment_on_ticket"].annotations.destructive_hint is True
+    assert tools["comment_on_ticket"].annotations.open_world_hint is True
+
+
+async def test_a_remote_plain_http_base_url_is_refused_over_the_wire() -> None:
+    """5.0.0: the token is never sent in the clear to a host that is not this
+    machine. The server still starts and lists tools — the refusal arrives on
+    the first call, naming the fix, like every other configuration error."""
+    async with stdio_client(
+        _params(
+            EBTEQDESK_BASE_URL="http://help.example.com",
+            EBTEQDESK_API_TOKEN="6|not-a-real-token",
+        )
+    ) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
+            result = await session.call_tool("whoami", {})
+
+    text = _text(result)
+    assert result.is_error
+    assert "plain http://" in text
+    assert "EBTEQDESK_ALLOW_INSECURE_HTTP=1" in text
+    assert "not-a-real-token" not in text
+
+
+async def test_the_insecure_http_warning_never_touches_stdout() -> None:
+    """🔴 The override prints a warning, and stdout is the transport. If it
+    went to stdout the session below would fail to parse the next message;
+    instead the call completes with an ordinary transport error.
+
+    192.0.2.1 is TEST-NET-1 (RFC 5737): routable nowhere, so the connection
+    fails within the short timeout rather than reaching anything.
+    """
+    async with stdio_client(
+        _params(
+            EBTEQDESK_BASE_URL="http://192.0.2.1:1",
+            EBTEQDESK_API_TOKEN="6|not-a-real-token",
+            EBTEQDESK_ALLOW_INSECURE_HTTP="1",
+            EBTEQDESK_TIMEOUT="0.5",
+        )
+    ) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
+            result = await session.call_tool("whoami", {})
+
+            # Still in sync after the warning was printed.
+            assert await session.send_ping() is not None
+
+    assert result.is_error
+    assert "plain http://" not in _text(result)
 
 
 async def test_the_server_starts_and_lists_tools_with_no_token_configured() -> None:

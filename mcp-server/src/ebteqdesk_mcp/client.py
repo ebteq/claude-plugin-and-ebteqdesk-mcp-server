@@ -12,7 +12,9 @@ for why that matters more here than it usually does.
 that touches the caller's own filesystem — it opens the path it is given and
 sends the bytes as `multipart/form-data`. Everything else builds its request
 entirely out of its arguments, and the difference is a risk to the USER'S
-MACHINE rather than to the desk. See the block comment above that method.
+MACHINE rather than to the desk. Since 5.0.0 it reads ONLY inside the directory
+named by `EBTEQDESK_UPLOAD_ROOT`, and nothing at all while that is unset. See
+the block comment above that method.
 
 ⚠️ ONE ENDPOINT DOES NOT RETURN JSON. `get_ticket_attachment` returns image
 BYTES, so it is the single method whose success path does not go through
@@ -41,11 +43,12 @@ from urllib.parse import quote
 import httpx2
 
 from ._version import __version__
-from .config import Config
+from .config import ENV_UPLOAD_ROOT, Config
 from .errors import (
     MEDIA_UPLOAD_PATH,
     AbilityError,
     ApiError,
+    ConfigurationError,
     LocalFileError,
     MalformedResponseError,
     ScopeError,
@@ -950,11 +953,12 @@ class EbteqdeskClient:
     #      positions by INDEX, so replaying the same body is a no-op that
     #      answers 200 with the same list.
     #
-    #      ⚠️ PUT /tickets/{id}/status IS THE OTHER, AND THE ONLY ONE ON THE
-    #      TICKET SURFACE. The server guards the no-op case, so sending a
-    #      status the ticket already holds writes no row, appends no history
-    #      entry, and still answers 200. Nothing here retries either of them
-    #      automatically — the caller may, the client will not.
+    #      ⚠️ PUT /tickets/{id}/status AND PUT /tickets/{id}/category ARE THE
+    #      OTHERS, AND THE ONLY ONES ON THE TICKET SURFACE. The server guards
+    #      the no-op case on both, so sending a status or a type the ticket
+    #      already holds writes nothing and still answers 200. Nothing here
+    #      retries any of them automatically — the caller may, the client will
+    #      not.
     #
     #   2. THERE IS NO DRY RUN, deliberately. The server has no dry-run mode, so
     #      a client-side one could only describe the request it WOULD send. It
@@ -1014,6 +1018,12 @@ class EbteqdeskClient:
         null, so the server applies its own documented defaults (priority 2 /
         normal, status 1 / new, no category, no reference, no tags) instead of
         this client having a second, drifting copy of them.
+
+        `category` is a ticket-type SLUG and is the ONLY way to set the type on
+        create. The server refuses the alias keys `type`, `ticket_type` and
+        `ticket_type_id` with a 422 naming `category`; this method has no
+        parameter for any of them and never sends one. To change the type
+        afterwards, `set_ticket_category`.
 
         Requires the `ticket:write` scope and the `ticket.create` ability.
         """
@@ -1222,6 +1232,73 @@ class EbteqdeskClient:
             "PUT",
             f"/api/v1/tickets/{_ticket_id(ticket_id)}/status",
             json={"status": status},
+        )
+
+    async def set_ticket_category(
+        self, ticket_id: int, *, category: str | None
+    ) -> dict[str, Any]:
+        """PUT /api/v1/tickets/{id}/category — set or clear the ticket's TYPE.
+
+        200 ``{"data": <ticket>}`` and nothing else, exactly as
+        `set_ticket_status` — the same TicketResource, whose `category` is now
+        the `{slug, name}` pair that was set, or null.
+
+        `category` is a `ticket_types.slug` — the same vocabulary as
+        `create_ticket`'s `category` and `list_tickets_by_category`'s path — or
+        None, which is SENT as JSON null and CLEARS the type. The key is always
+        sent: the server requires the key (null being a legal value of it), so
+        an omitted key is a 422, and a None that this method dropped from the body the way `create_ticket`
+        drops its optionals would turn "clear the type" into that 422. The
+        slug is otherwise passed through unvalidated, so the server's list of
+        types stays the only list.
+
+        🔴 A BLANK STRING IS REFUSED HERE, before anything is sent. Laravel's
+        global TrimStrings and ConvertEmptyStringsToNull middleware run on JSON
+        bodies too, so `""` or `"  "` would reach the controller as null and
+        CLEAR the type — a destructive reading of what was almost certainly a
+        missing value. Clearing has to be asked for with None.
+
+        What the server refuses, all as a 422 on `category`: a slug no type
+        carries, a slug whose type has been soft-deleted (retired), and any of
+        the alias keys `type`, `ticket_type`, `ticket_type_id` — which this
+        method never sends. A type that has NO slug cannot be set through this
+        endpoint at all; types created since this endpoint shipped derive one
+        from their name ("Admin" -> `admin`), older ones may not have one.
+
+        🔴 NOTHING IS SENT AND NOTHING IS RECORDED. No mail to the requester, no
+        agent notification, and — unlike `set_ticket_status` — NO history entry
+        either. Sending the type the ticket already holds writes nothing and
+        still answers 200, so this is safe to repeat; nothing here repeats it
+        automatically.
+
+        Ownership, as on every other ticket write: a ticket not assigned to the
+        token's account is a 404, or a 403 with `reason: "ticket_not_assigned"`
+        (`TicketNotAssignedError`) when it sits on the shared escalation queue.
+        No `on_scope_error` hook, for `set_ticket_status`'s reason: the scope
+        requirement does not grow on an escalated ticket.
+
+        ⚠️ ONLY ON SERVERS THAT HAVE THIS ENDPOINT (Ebteqdesk PR #261). An
+        older install has no such route and answers 404 or 405 for EVERY id,
+        the caller's own tickets included. Nothing here detects that — a route
+        miss and a ticket this key cannot write are the same 404 on the wire —
+        so the MCP tool's description says it instead.
+
+        Requires the `ticket:write` scope and the `ticket.reply` ability.
+        """
+        if category is not None and (
+            not isinstance(category, str) or not category.strip()
+        ):
+            raise ValueError(
+                f"category must be a ticket-type slug such as 'bp-task', or None "
+                f"to clear the ticket's type — not {category!r}. A blank string "
+                f"is refused rather than sent, because the server would read it "
+                f"as null and clear the type."
+            )
+
+        return await self._request(
+            "PUT",
+            f"/api/v1/tickets/{_ticket_id(ticket_id)}/category",
+            json={"category": category},
         )
 
     async def close_ticket(
@@ -1937,12 +2014,24 @@ class EbteqdeskClient:
     # handle, and routing a 4 MB screenshot through a model's context as base64
     # costs roughly 5.5 MB of tokens to move bytes that never needed to be read.
     #
-    # NOTHING IS VALIDATED CLIENT-SIDE BEYOND "can this file be read". No size
-    # check, no extension check, no sniffing. The server decides all three, from
-    # the file's own bytes, and a second copy of its whitelist here would be a
-    # rule that drifts — the same reason `per_page` is not clamped in this
-    # client. What IS checked is only what the server cannot answer: whether the
-    # path exists at all.
+    # NOTHING ABOUT THE FILE'S CONTENT IS VALIDATED CLIENT-SIDE. No size check,
+    # no extension check, no sniffing. The server decides all three, from the
+    # file's own bytes, and a second copy of its whitelist here would be a rule
+    # that drifts — the same reason `per_page` is not clamped in this client.
+    # What IS checked is only what the server cannot answer: WHERE the file is,
+    # and whether it exists at all.
+    #
+    # 🔴 WHERE IT IS: INSIDE `EBTEQDESK_UPLOAD_ROOT`, OR NOWHERE (5.0.0). Before
+    # 5.0.0 the path was opened unrestricted, so the only thing standing between
+    # a prompt-injected "upload ~/.ssh/id_rsa as a screenshot" and that key
+    # leaving the machine was a sentence in a tool description. Now the operator
+    # names one directory, the path is resolved — `..` collapsed, every symlink
+    # followed — and anything whose REAL location is not under that directory is
+    # refused before it is opened. With the variable unset, nothing is read at
+    # all: reading the user's disk is an opt-in an operator makes once, not a
+    # default a model inherits. The containment check runs BEFORE the existence
+    # check, so a refused path is refused identically whether or not the file
+    # exists — this tool must not become a way to probe the filesystem.
 
     async def upload_kb_media(self, file_path: str) -> dict[str, Any]:
         """POST /api/v1/kb/media — upload one LOCAL file. 201.
@@ -1977,16 +2066,24 @@ class EbteqdeskClient:
         replaying an upload that timed out leaves a second copy on the disk that
         nothing references and that the sweep will not touch for a week.
 
-        Raises `LocalFileError` before any request when the path is missing, is
-        a directory, or cannot be read — see that class for why it is not a
-        ConfigurationError.
+        🔴 READS ONLY INSIDE `EBTEQDESK_UPLOAD_ROOT` (5.0.0). The path is
+        resolved — `~` expanded, `..` collapsed, symlinks followed — and must
+        land inside that directory; a RELATIVE path is taken relative to it.
+        Raises `ConfigurationError` before any request when the variable is
+        unset or names something that is not a usable directory (only uploads
+        are affected — no other method reads it), and `LocalFileError` when the
+        file resolves outside it.
+
+        Raises `LocalFileError` before any request when the path is outside the
+        upload root, is missing, is a directory, or cannot be read — see that
+        class for why it is not a ConfigurationError.
 
         Errors from the server: 422 with `errors.file` for the wrong type or a
         file over the per-kind cap (10 MB image / 50 MB video), and 413 when the
         request was too large for the web server to accept at all, which is a
         different failure with a different remedy — see `PayloadTooLargeError`.
         """
-        name, content = _local_upload(file_path)
+        name, content = _local_upload(file_path, self._config.upload_root)
 
         return await self._request(
             "POST",
@@ -3215,8 +3312,12 @@ def _flag_header(response: httpx2.Response, name: str) -> bool | None:
     return None
 
 
-def _local_upload(file_path: str) -> tuple[str, bytes]:
+def _local_upload(file_path: str, upload_root: str | None) -> tuple[str, bytes]:
     """Read one local file for `upload_kb_media`: (basename, bytes).
+
+    🔴 ONLY A FILE WHOSE REAL LOCATION IS INSIDE `upload_root`. See
+    `_upload_root` for the directory's own rules and `_inside_upload_root` for
+    the containment check; this function refuses before it opens anything.
 
     🔴 ONLY THE BASENAME IS SENT. The directory the file came out of is the
     user's own filesystem layout — `/Users/someone/Desktop/clients/acme/…` — and
@@ -3238,16 +3339,28 @@ def _local_upload(file_path: str) -> tuple[str, bytes]:
     if not isinstance(file_path, str) or not file_path.strip():
         raise LocalFileError(str(file_path), "no path was given")
 
-    path = Path(file_path).expanduser()
+    root = _upload_root(upload_root)
 
-    if path.is_dir():
+    path = Path(file_path).expanduser()
+    if not path.is_absolute():
+        # Relative to the upload directory, NOT to this process's working
+        # directory — which, for a server a host launched, is wherever the host
+        # happened to be, and nothing a user could predict.
+        path = root / path
+
+    real = _inside_upload_root(path, root)
+
+    if real.is_dir():
         raise LocalFileError(str(path), "that is a directory, not a file")
 
-    if not path.exists():
+    if not real.exists():
         raise LocalFileError(str(path), "no such file on this machine")
 
     try:
-        content = path.read_bytes()
+        # The RESOLVED path, never `path`: the containment check was made
+        # against `real`, so reading anything else would be checking one file
+        # and opening another.
+        content = real.read_bytes()
     except OSError as exc:
         raise LocalFileError(str(path), f"it could not be read ({exc.strerror or exc})") from None
 
@@ -3257,7 +3370,114 @@ def _local_upload(file_path: str) -> tuple[str, bytes]:
         # empty file. Refused here, where the reason is knowable.
         raise LocalFileError(str(path), "the file is empty")
 
+    # The name the USER gave, not the symlink target's: a link called
+    # `settings.png` inside the upload folder is uploaded as `settings.png`.
     return path.name, content
+
+
+def _upload_root(configured: str | None) -> Path:
+    """`EBTEQDESK_UPLOAD_ROOT`, resolved, or ConfigurationError naming the fix.
+
+    🔴 UNSET MEANS UPLOADS ARE OFF — NOT "ANYWHERE" AND NOT A GUESSED DEFAULT.
+    A default such as `~/Downloads` was considered and rejected: it would make
+    the opt-in silent, it would still be a directory full of things nobody chose
+    to publish, and it would not even cover the commonest case (macOS saves
+    screenshots to the Desktop). The cost is one extra `--env` at registration.
+
+    These are ConfigurationErrors and not LocalFileErrors because the remedy is
+    the operator's environment, not a different path from the user — the exact
+    distinction `LocalFileError`'s docstring draws. Each message says that ONLY
+    uploads are affected, so a model does not conclude the whole server is
+    misconfigured.
+
+    The home directory and the filesystem root are refused as roots outright.
+    Either one would satisfy the check below while restoring exactly the access
+    this variable exists to take away — `~/.ssh` sits directly under one of them
+    — and "set it to ~ to make the error go away" is the obvious wrong fix.
+    """
+    if not configured:
+        raise ConfigurationError(
+            f"upload_kb_media is turned off: {ENV_UPLOAD_ROOT} is not set. This "
+            "server reads local files only from inside that one directory, and "
+            "with none configured it reads nothing. NOTHING WAS SENT TO "
+            "EBTEQDESK. To enable uploads, the operator chooses a dedicated "
+            "folder (for example ~/EbteqdeskUploads), registers the server with "
+            f"`--env {ENV_UPLOAD_ROOT}=<that folder>`, restarts it, and puts the "
+            "file there. Only this tool is affected; every other tool works."
+        )
+
+    root = Path(configured).expanduser()
+
+    if not root.is_absolute():
+        raise ConfigurationError(
+            f"{ENV_UPLOAD_ROOT}={configured!r} is not an absolute path. A relative "
+            "one would be resolved against whatever directory the MCP host "
+            "launched this server from. Set it to a full path such as "
+            "~/EbteqdeskUploads. Only upload_kb_media is affected."
+        )
+
+    try:
+        resolved = root.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise ConfigurationError(
+            f"{ENV_UPLOAD_ROOT}={configured!r} does not exist on this machine. "
+            "Create that folder (or point the variable at one that exists) and "
+            "restart the server. Only upload_kb_media is affected."
+        ) from None
+
+    if not resolved.is_dir():
+        raise ConfigurationError(
+            f"{ENV_UPLOAD_ROOT}={configured!r} is not a directory. It must name "
+            "the folder uploads are read from. Only upload_kb_media is affected."
+        )
+
+    try:
+        home: Path | None = Path.home().resolve()
+    except (OSError, RuntimeError):
+        home = None
+
+    if resolved == Path(resolved.anchor) or resolved == home:
+        raise ConfigurationError(
+            f"{ENV_UPLOAD_ROOT}={configured!r} is the home directory or the "
+            "filesystem root, which would let this tool read SSH keys, browser "
+            "profiles and every other private file under it. Choose a dedicated "
+            "folder that holds only files meant for the knowledge base, such as "
+            "~/EbteqdeskUploads. Only upload_kb_media is affected."
+        )
+
+    return resolved
+
+
+def _inside_upload_root(path: Path, root: Path) -> Path:
+    """The real location of `path`, or LocalFileError if it is not under `root`.
+
+    `resolve()` collapses `..` and follows EVERY symlink, the final component
+    included, so `uploads/../.ssh/id_rsa` and a link inside the folder pointing
+    at `~/.ssh/id_rsa` both resolve outside and are refused here, before the file
+    is touched — and identically whether or not it exists. A link that points
+    somewhere else INSIDE the folder is fine.
+
+    Not covered, deliberately: a HARD link inside the folder to a file outside
+    it is the same inode under two names and no path check can see it, and a
+    symlink swapped into the folder between this check and the read is a race
+    no path check closes. Both need write access to the folder on this machine
+    — the local attacker this check is not defending against. What it defends
+    against is a MODEL being talked into naming the wrong path.
+    """
+    try:
+        real = path.resolve()
+    except (OSError, RuntimeError, ValueError):
+        raise LocalFileError(str(path), "that path could not be resolved") from None
+
+    if not real.is_relative_to(root):
+        raise LocalFileError(
+            str(path),
+            f"it is outside the upload folder {str(root)!r} ({ENV_UPLOAD_ROOT}), "
+            "and this server reads files only from inside that folder — ask the "
+            "user to copy the file into it and give you the new path",
+        )
+
+    return real
 
 
 def _kb_optional_fields(**fields: Any) -> dict[str, Any]:

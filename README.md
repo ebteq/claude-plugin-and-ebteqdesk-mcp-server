@@ -117,7 +117,7 @@ your host reports at connect time, treat these skills as possibly stale and trus
 tool descriptions over them.
 
 ⚠️ **Right now it does not match, and this is exactly where the gap is.** The server in
-this repository is **4.5.0, with 46 tools**. The skills have **not** been re-verified
+this repository is **5.1.0, with 47 tools**. The skills have **not** been re-verified
 against it — that is outstanding work in its own right, not something the repository merge
 did or could do. The known gaps:
 
@@ -127,7 +127,7 @@ did or could do. The known gaps:
 | 4.0.0 | 🔴 **A live wrong claim, not just a hole.** `update_kb_article` on a **published** article stopped failing with `409` and now succeeds with `202`, staging a pending revision and handing back the **live, unchanged** article. `knowledge-base/SKILL.md` still says "A published article is refused with 409, not edited and not unpublished" |
 | 4.1.0 | `propose_kb_article` and `update_kb_article` gained eight optional `en_*` / `zhcn_*` arguments so one call carries both languages. The skill's bilingual guidance predates them, and on a **published** article the old one-call-per-locale approach now *replaces* rather than accumulates — the second call drops the first language |
 | 4.2.0 | the nine agent-provisioning tools — `list_agents`, `get_agent`, `list_roles`, `list_groups`, `list_api_keys`, `create_agent`, `update_agent`, `issue_api_key`, `revoke_api_key`. No skill mentions any of them; four write, two return a secret exactly once, and none can be undone through the API |
-| 4.5.0 | ✅ the four Warni Activity read tools — `activity_summary`, `activity_list`, `activity_list_dormant`, `activity_get_customer`. **Covered:** the `reports` skill was written against them and says so (`Verified against 4.5.0`); plan `all` is the default and `free` is legacy history only |
+| 5.1.0 | ✅ the four Warni Activity read tools — `activity_summary`, `activity_list`, `activity_list_dormant`, `activity_get_customer`. **Covered:** the `reports` skill was written against them and says so (`Verified against 5.1.0`); plan `all` is the default and `free` is legacy history only |
 
 What the skills *do* describe was checked against 1.6.0, and no tool that existed then has
 been renamed or removed, or changed the meaning of an argument a 1.6.0-era caller would

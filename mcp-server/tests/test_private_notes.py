@@ -380,7 +380,22 @@ async def test_a_tool_call_round_trips(wired) -> None:
     )
 
     assert not result.is_error
-    assert result.structured_content == ticket_payload()
+
+    # The ticket comes back with its requester-written fields ENVELOPED (5.0.0)
+    # — the receipt is the same TicketResource every list returns, and the
+    # subject on it was typed by whoever raised the ticket. Every other field is
+    # the API's own, untouched.
+    structured = result.structured_content
+    ticket = ticket_payload()["data"]
+
+    assert structured["untrusted_content_notice"]
+    assert structured["data"]["subject"] == {"untrusted_content": ticket["subject"]}
+    assert structured["data"]["requester"]["name"] == {
+        "untrusted_content": ticket["requester"]["name"]
+    }
+
+    untouched = {k: v for k, v in ticket.items() if k not in ("subject", "requester")}
+    assert {k: structured["data"][k] for k in untouched} == untouched
 
 
 async def test_a_scope_refusal_reaches_the_client_as_readable_text(wired) -> None:

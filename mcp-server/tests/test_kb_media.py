@@ -15,6 +15,13 @@ fabricates a `/kb/media/{ULID}` publishes a broken image into a live knowledge
 base signed-out visitors read — invisible to the author, who is signed in and
 sees it render. The sentence forbidding that is the entire mitigation, so it is
 asserted like a behaviour.
+
+🔴 AND SINCE 5.0.0 A THIRD HALF: THE UPLOAD ROOT. The tool reads only inside
+`EBTEQDESK_UPLOAD_ROOT` and nothing while it is unset, so every test here that
+expects a file to be READ runs with the root set to its own `tmp_path` (the
+`config` fixture below overrides conftest's for exactly that), and the
+containment tests further down prove what is refused and that a refusal sends
+nothing.
 """
 
 from __future__ import annotations
@@ -25,8 +32,11 @@ import pytest
 from conftest import always_json, json_response
 from mcp.server.mcpserver.exceptions import ToolError
 
+from conftest import BASE_URL, TOKEN
 from ebteqdesk_mcp import server as srv
+from ebteqdesk_mcp.config import ENV_UPLOAD_ROOT, Config
 from ebteqdesk_mcp.errors import (
+    ConfigurationError,
     InvalidRequestError,
     LocalFileError,
     PayloadTooLargeError,
@@ -53,6 +63,18 @@ UPLOADED = {
     "size_bytes": len(PNG_BYTES),
     "original_name": "settings.png",
 }
+
+
+@pytest.fixture
+def config(tmp_path) -> Config:
+    """conftest's `config`, WITH an upload root — the test's own `tmp_path`.
+
+    Overrides the shared fixture for this module only, so `make_client` builds a
+    client that may read files the tests below write into `tmp_path`. Every
+    other module keeps the shared fixture, whose `upload_root` is None — the
+    shipped default, under which no upload reads anything.
+    """
+    return Config(base_url=BASE_URL, token=TOKEN, timeout=5.0, upload_root=str(tmp_path))
 
 
 @pytest.fixture
@@ -121,17 +143,24 @@ async def test_it_sends_the_bearer_token_and_never_the_path_in_the_url(
 
 
 async def test_a_tilde_path_is_expanded_rather_than_sent_literally(
-    make_client, png, monkeypatch
+    make_client, tmp_path, monkeypatch
 ) -> None:
     """`~/shot.png` is what a user types. Sending it literally would be a
-    LocalFileError for a file that is right there."""
-    monkeypatch.setenv("HOME", str(png.parent))
-    monkeypatch.setenv("USERPROFILE", str(png.parent))
+    LocalFileError for a file that is right there.
+
+    HOME is the PARENT of the upload root here, not the root itself: a root that
+    IS the home directory is refused outright (see the containment tests), so
+    the tilde is exercised the way a real install would use it —
+    `~/<upload folder>/<file>`.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path.parent))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path.parent))
+    (tmp_path / "settings.png").write_bytes(PNG_BYTES)
 
     client, recorder = make_client(always_json(201, UPLOADED))
 
     async with client:
-        await client.upload_kb_media("~/settings.png")
+        await client.upload_kb_media(f"~/{tmp_path.name}/settings.png")
 
     assert recorder.last.url.path == MEDIA_PATH
     assert PNG_BYTES in recorder.last.content
@@ -225,6 +254,281 @@ async def test_nothing_is_validated_client_side_beyond_readability(
 
 
 # --------------------------------------------------------------------------- #
+# The upload root — what the tool may read at all (5.0.0)
+# --------------------------------------------------------------------------- #
+#
+# 🔴 BEFORE 5.0.0 THE ONLY CONTROL HERE WAS A SENTENCE IN A TOOL DESCRIPTION.
+# `upload_kb_media("~/.ssh/id_rsa")` opened the key and POSTed it to the desk,
+# where any agent reading the KB media store could fetch it. A prompt injected
+# into a ticket body only had to persuade the model to call it. These tests are
+# the replacement control, and every one of them asserts that NOTHING WENT OUT.
+
+
+def _client_rooted_at(root: str | None):
+    """A client like `make_client`'s, but with an explicit upload root."""
+    from ebteqdesk_mcp.client import EbteqdeskClient
+
+    recorded: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        recorded.append(request)
+        return json_response(201, UPLOADED)
+
+    config = Config(base_url=BASE_URL, token=TOKEN, timeout=5.0, upload_root=root)
+
+    return EbteqdeskClient(config, transport=httpx2.MockTransport(handler)), recorded
+
+
+@pytest.fixture
+def home_with_a_private_key(tmp_path, monkeypatch):
+    """A fake home: `~/.ssh/id_rsa` holding a recognisable secret, and an
+    `~/EbteqdeskUploads` folder beside it holding one legitimate screenshot."""
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    key = home / ".ssh" / "id_rsa"
+    key.write_bytes(b"-----BEGIN OPENSSH PRIVATE KEY-----\nSECRET\n")
+
+    uploads = home / "EbteqdeskUploads"
+    uploads.mkdir()
+    (uploads / "settings.png").write_bytes(PNG_BYTES)
+
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    return home, uploads, key
+
+
+async def test_an_unset_upload_root_reads_nothing_and_sends_nothing(
+    home_with_a_private_key,
+) -> None:
+    """🔴 THE DEFAULT. No root configured means uploads are OFF — not "anywhere"
+    and not a guessed folder. A legitimate file is refused too; that is the
+    price of making file access an explicit operator choice."""
+    _, uploads, _ = home_with_a_private_key
+    client, recorded = _client_rooted_at(None)
+
+    async with client:
+        with pytest.raises(ConfigurationError) as excinfo:
+            await client.upload_kb_media(str(uploads / "settings.png"))
+
+    assert recorded == []
+
+    message = str(excinfo.value)
+    assert ENV_UPLOAD_ROOT in message
+    assert "is not set" in message
+    assert "NOTHING WAS SENT TO EBTEQDESK" in message
+    # It must not read as "the server is broken": only this tool is affected.
+    assert "Only this tool is affected" in message
+
+
+@pytest.mark.parametrize(
+    "given",
+    [
+        "~/.ssh/id_rsa",
+        # A relative path is taken relative to the ROOT — so this is
+        # uploads/../.ssh/id_rsa, which `..` walks straight out of.
+        "../.ssh/id_rsa",
+    ],
+)
+async def test_a_private_key_outside_the_root_is_refused_before_it_is_opened(
+    home_with_a_private_key, given: str
+) -> None:
+    """🔴 THE ASSERTION THIS SECTION EXISTS FOR."""
+    _, uploads, _ = home_with_a_private_key
+    client, recorded = _client_rooted_at(str(uploads))
+
+    async with client:
+        with pytest.raises(LocalFileError) as excinfo:
+            await client.upload_kb_media(given)
+
+    # Nothing went out, so not one byte of the key can have either.
+    assert recorded == []
+
+    message = str(excinfo.value)
+    assert "outside the upload folder" in message
+    assert ENV_UPLOAD_ROOT in message
+    assert "NOTHING WAS SENT TO EBTEQDESK" in message
+    assert "SECRET" not in message
+
+
+async def test_the_absolute_ssh_key_path_is_refused_too(home_with_a_private_key) -> None:
+    _, uploads, key = home_with_a_private_key
+    client, recorded = _client_rooted_at(str(uploads))
+
+    async with client:
+        with pytest.raises(LocalFileError, match="outside the upload folder"):
+            await client.upload_kb_media(str(key))
+
+    assert recorded == []
+
+
+async def test_a_refused_path_is_refused_identically_whether_or_not_it_exists(
+    home_with_a_private_key,
+) -> None:
+    """The containment check runs BEFORE the existence check, so this tool
+    cannot be used to learn whether `~/.aws/credentials` exists."""
+    home, uploads, _ = home_with_a_private_key
+    client, _ = _client_rooted_at(str(uploads))
+
+    async with client:
+        with pytest.raises(LocalFileError) as exists:
+            await client.upload_kb_media(str(home / ".ssh" / "id_rsa"))
+        with pytest.raises(LocalFileError) as absent:
+            await client.upload_kb_media(str(home / ".ssh" / "id_ed25519"))
+
+    assert exists.value.reason == absent.value.reason
+    assert "no such file" not in absent.value.reason
+
+
+async def test_a_symlink_inside_the_root_pointing_out_of_it_is_refused(
+    home_with_a_private_key,
+) -> None:
+    """`settings.png -> ~/.ssh/id_rsa` sits INSIDE the folder by name. Its real
+    location is what is checked, and its real location is outside."""
+    _, uploads, key = home_with_a_private_key
+    disguised = uploads / "innocent.png"
+    disguised.symlink_to(key)
+
+    client, recorded = _client_rooted_at(str(uploads))
+
+    async with client:
+        with pytest.raises(LocalFileError, match="outside the upload folder"):
+            await client.upload_kb_media(str(disguised))
+
+    assert recorded == []
+
+
+async def test_a_symlinked_directory_inside_the_root_cannot_escape_it_either(
+    home_with_a_private_key,
+) -> None:
+    home, uploads, _ = home_with_a_private_key
+    (uploads / "dotfiles").symlink_to(home / ".ssh", target_is_directory=True)
+
+    client, recorded = _client_rooted_at(str(uploads))
+
+    async with client:
+        with pytest.raises(LocalFileError, match="outside the upload folder"):
+            await client.upload_kb_media(str(uploads / "dotfiles" / "id_rsa"))
+
+    assert recorded == []
+
+
+async def test_a_symlink_that_stays_inside_the_root_is_uploaded_under_its_own_name(
+    home_with_a_private_key,
+) -> None:
+    _, uploads, _ = home_with_a_private_key
+    (uploads / "nested").mkdir()
+    link = uploads / "nested" / "shot.png"
+    link.symlink_to(uploads / "settings.png")
+
+    client, recorded = _client_rooted_at(str(uploads))
+
+    async with client:
+        await client.upload_kb_media(str(link))
+
+    assert len(recorded) == 1
+    assert PNG_BYTES in recorded[0].content
+    # The name the user gave, not the link target's.
+    assert b'filename="shot.png"' in recorded[0].content
+
+
+async def test_a_relative_path_is_resolved_inside_the_root(home_with_a_private_key) -> None:
+    """Relative to the upload folder — never to whatever directory the MCP host
+    launched this process from."""
+    _, uploads, _ = home_with_a_private_key
+    client, recorded = _client_rooted_at(str(uploads))
+
+    async with client:
+        await client.upload_kb_media("settings.png")
+
+    assert len(recorded) == 1
+    assert PNG_BYTES in recorded[0].content
+
+
+async def test_the_root_may_itself_be_given_with_a_tilde(home_with_a_private_key) -> None:
+    client, recorded = _client_rooted_at("~/EbteqdeskUploads")
+
+    async with client:
+        await client.upload_kb_media("~/EbteqdeskUploads/settings.png")
+
+    assert len(recorded) == 1
+
+
+@pytest.mark.parametrize("root", ["~", "/"])
+async def test_the_home_directory_and_the_filesystem_root_are_refused_as_roots(
+    home_with_a_private_key, root: str
+) -> None:
+    """Either would pass the containment check while handing `~/.ssh` straight
+    back — and "set it to ~" is the obvious wrong fix for the unset error."""
+    client, recorded = _client_rooted_at(root)
+
+    async with client:
+        with pytest.raises(ConfigurationError, match="home directory or the filesystem root"):
+            await client.upload_kb_media("~/.ssh/id_rsa")
+
+    assert recorded == []
+
+
+@pytest.mark.parametrize(
+    "root, fragment",
+    [
+        ("EbteqdeskUploads", "not an absolute path"),
+        ("/definitely/not/a/real/folder", "does not exist"),
+    ],
+)
+async def test_an_unusable_root_names_itself_and_only_costs_uploads(
+    root: str, fragment: str
+) -> None:
+    client, recorded = _client_rooted_at(root)
+
+    async with client:
+        with pytest.raises(ConfigurationError) as excinfo:
+            await client.upload_kb_media("/tmp/anything.png")
+
+    assert recorded == []
+    assert fragment in str(excinfo.value)
+    assert ENV_UPLOAD_ROOT in str(excinfo.value)
+    assert "Only upload_kb_media is affected" in str(excinfo.value)
+
+
+async def test_a_root_that_is_a_file_is_refused(tmp_path) -> None:
+    not_a_dir = tmp_path / "uploads.txt"
+    not_a_dir.write_text("x")
+
+    client, recorded = _client_rooted_at(str(not_a_dir))
+
+    async with client:
+        with pytest.raises(ConfigurationError, match="is not a directory"):
+            await client.upload_kb_media(str(not_a_dir))
+
+    assert recorded == []
+
+
+async def test_the_refusal_reaches_the_mcp_client_as_readable_text(
+    monkeypatch, home_with_a_private_key
+) -> None:
+    """A path outside the root, through the tool: prose, not a traceback."""
+    from ebteqdesk_mcp.client import EbteqdeskClient
+
+    _, uploads, key = home_with_a_private_key
+    config = Config(base_url=BASE_URL, token=TOKEN, timeout=5.0, upload_root=str(uploads))
+    client = EbteqdeskClient(
+        config, transport=httpx2.MockTransport(lambda r: json_response(201, UPLOADED))
+    )
+    monkeypatch.setattr(srv, "_client", client)
+
+    try:
+        with pytest.raises(ToolError) as excinfo:
+            await srv.mcp.call_tool("upload_kb_media", {"file_path": str(key)})
+    finally:
+        monkeypatch.setattr(srv, "_client", None)
+
+    text = str(excinfo.value)
+    assert "outside the upload folder" in text
+    assert "Traceback" not in text
+
+
+# --------------------------------------------------------------------------- #
 # The two error surfaces that matter on an upload
 # --------------------------------------------------------------------------- #
 
@@ -308,13 +612,20 @@ async def test_the_attachment_413_keeps_its_own_remedy() -> None:
 
 
 @pytest.fixture
-def wired(monkeypatch):
-    """Install a client whose socket is `handler` as the server's shared client."""
+def wired(monkeypatch, tmp_path):
+    """Install a client whose socket is `handler` as the server's shared client.
+
+    With `tmp_path` as its upload root, the same as this module's `config`.
+    """
     from ebteqdesk_mcp.client import EbteqdeskClient
-    from ebteqdesk_mcp.config import Config
 
     def install(handler):
-        config = Config(base_url="https://ebteqdesk.test", token="6|t", timeout=5.0)
+        config = Config(
+            base_url="https://ebteqdesk.test",
+            token="6|t",
+            timeout=5.0,
+            upload_root=str(tmp_path),
+        )
         client = EbteqdeskClient(config, transport=httpx2.MockTransport(handler))
         monkeypatch.setattr(srv, "_client", client)
         return client
@@ -421,6 +732,17 @@ async def test_the_description_carries_the_local_filesystem_warning(upload_tool)
     assert "never guess at a path" in description
 
 
+async def test_the_description_names_the_upload_root_and_its_default(upload_tool) -> None:
+    """5.0.0: the description is no longer the ONLY control, but a model still
+    has to know the folder exists to tell the user where to put a file — and
+    must not go hunting for a path that works."""
+    description = described(upload_tool)
+
+    assert f"`{ENV_UPLOAD_ROOT}`" in description
+    assert "UNSET, IT REFUSES EVERY CALL" in description
+    assert "copy the file into that folder" in description
+
+
 async def test_the_description_quotes_the_types_and_the_caps(upload_tool) -> None:
     description = described(upload_tool)
 
@@ -479,4 +801,4 @@ async def test_the_instructions_carry_the_same_two_rules() -> None:
     assert "NEVER INVENT A `/kb/media/` URL" in instructions
     assert "reads the local filesystem" in instructions.lower()
     assert "`upload_kb_media`" in instructions
-    assert "TWENTY-ONE WRITE TOOLS" in instructions
+    assert "TWENTY-TWO WRITE TOOLS" in instructions

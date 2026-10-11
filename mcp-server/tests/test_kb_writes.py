@@ -29,8 +29,8 @@ of the DESCRIPTIONS as much as of the code:
 `get_kb_article_review` is gated on `kb:write` while changing nothing — and so
 are `list_kb_proposals`, `list_kb_tree`, `list_kb_categories` and
 `list_kb_folders` (tests/test_kb_proposals.py and tests/test_kb_structure.py),
-which is why the tool roster in test_server_tools counts SEVENTEEN writes and
-TWENTY-TWO write-scoped tools. That asymmetry is asserted rather than left as a
+which is why the tool roster in test_server_tools counts TWENTY-TWO writes and
+TWENTY-SEVEN write-scoped tools. That asymmetry is asserted rather than left as a
 comment.
 """
 
@@ -444,8 +444,12 @@ async def test_a_staged_202_reaches_the_mcp_client_as_a_SUCCESS(wired) -> None:
 
     assert not result.is_error
     assert result.structured_content["revision"]["state"] == "pending"
-    # The live text, not the submission — through the whole MCP layer.
-    assert result.structured_content["data"]["title"] == "Resetting your VPN password"
+    # The live text, not the submission — through the whole MCP layer. And
+    # enveloped (5.0.0): the live article was written by whoever wrote it, not
+    # by this caller, so its title arrives as untrusted content like any read's.
+    assert result.structured_content["data"]["title"] == {
+        "untrusted_content": "Resetting your VPN password"
+    }
 
 
 async def test_the_review_tool_carries_the_revision_through_mcp(wired) -> None:

@@ -4,7 +4,7 @@ Four Claude Code skills for working an Ebteqdesk helpdesk through its MCP server
 
 | Skill | Covers |
 |---|---|
-| `ebteqdesk:tickets` | List and read tickets (own queue, or the whole account with `scope="all"`), the full conversation, attachments, reply, internal notes, move a ticket between working states or reopen one, open a ticket, close one |
+| `ebteqdesk:tickets` | List and read tickets (own queue, or the whole account with `scope="all"`), the full conversation, attachments, reply, internal notes, move a ticket between working states or reopen one, change or clear a ticket's type, open a ticket, close one |
 | `ebteqdesk:escalations` | The shared escalation queue, reading and replying on escalated tickets, escalate, de-escalate, close |
 | `ebteqdesk:knowledge-base` | Search and read articles (including per-language versions), the category/folder tree across Ebteqdesk's two knowledge bases (Salon V3 and Warni), propose and update articles, check a review verdict or the proposal queue, upload and embed screenshots, create/delete categories and folders, reorder |
 | `ebteqdesk:reports` | The account-wide ticket report, the per-category escalation report, and the Warni POS activity score (summary first, then the dormant-customer review) |
@@ -14,9 +14,9 @@ If the server you are connected to reports a different version in
 `serverInfo.version`, treat that skill as possibly stale.
 
 ✅ **All four skills have now been fully re-read against `4.3.0` (42 tools).
-Three lines say so; `reports` says `4.5.0` (46 tools), because 4.5.0 added the
-four Warni Activity reads and only that skill covers them. The 4.5.0 change touches
-none of the other three skills.** The first pass (`knowledge-base` only) left the
+Two lines say so; `reports` says `5.1.0` (47 tools), because 5.1.0 added the
+four Warni Activity reads and only that skill covers them. The 5.1.0 change touches
+none of the other skills.** The first pass (`knowledge-base` only) left the
 other three at `1.6.0` on a spot check that only compared tool *signatures* —
 which is exactly the check this project's own retrospective on that pass
 warned was not enough, since neither of the two worst items the KB pass found
@@ -27,6 +27,13 @@ way the KB pass did, and found real drift in all three — worst in `reports`
 and `escalations`, both of which carried running advice that was actively
 wrong rather than merely incomplete — see
 [Keeping these skills true](#keeping-these-skills-true) for the itemised list.
+
+✅ **`ebteqdesk:tickets` has since been re-read against `4.4.0` (43 tools)**,
+the release that adds `set_ticket_category`, and its line says so. The other
+three still say `4.3.0`, correctly: the only thing 4.4.0 changed that they
+mention is the count of retry-safe writes (two → three), and that sentence was
+corrected in `escalations` and `knowledge-base` in the same pull request without
+moving their lines, since neither was re-read in full.
 
 ## What this plugin is not
 
@@ -194,6 +201,17 @@ or removed, or changed the meaning of an argument a caller from that version
 would pass — the ordinary minor/major discipline `mcp-server/README.md`
 describes. What changed between the two passes was not the tool surface; it
 was how thoroughly each skill had been read against it.
+
+⚠️ **`ebteqdesk-mcp` 5.0.0 changed response shapes, and the skills were edited
+for it WITHOUT a full re-read.** Text a requester or another third party wrote —
+ticket subjects and bodies, conversation entries, names, filenames, article
+titles, bodies and review notes — now arrives as `{"untrusted_content": "…"}`,
+and `upload_kb_media` reads only inside `EBTEQDESK_UPLOAD_ROOT`. `tickets`,
+`escalations` and `knowledge-base` each gained the paragraph that says so, at
+the point where they name those fields. Their "Verified against" lines still
+say what they said before (`4.3.0` for `escalations`, `reports` and
+`knowledge-base`; `4.4.0` for `tickets`) on purpose: per the rule above, a line moves only after a
+description-level re-read, and this release did not do one.
 
 ## Agent provisioning: nine tools, no skill
 

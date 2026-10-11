@@ -366,5 +366,5 @@ async def test_the_instructions_carry_the_shared_list_warning() -> None:
 
     assert "`list_kb_proposals`" in instructions
     assert "SECOND SHARED LIST" in instructions
-    assert "TWENTY-SIX tools require a write scope" in instructions
-    assert "twenty-five tools that read and twenty-one that WRITE" in instructions
+    assert "TWENTY-SEVEN tools require a write scope" in instructions
+    assert "twenty-five tools that read and twenty-two that WRITE" in instructions
