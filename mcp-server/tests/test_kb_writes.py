@@ -444,8 +444,12 @@ async def test_a_staged_202_reaches_the_mcp_client_as_a_SUCCESS(wired) -> None:
 
     assert not result.is_error
     assert result.structured_content["revision"]["state"] == "pending"
-    # The live text, not the submission — through the whole MCP layer.
-    assert result.structured_content["data"]["title"] == "Resetting your VPN password"
+    # The live text, not the submission — through the whole MCP layer. And
+    # enveloped (5.0.0): the live article was written by whoever wrote it, not
+    # by this caller, so its title arrives as untrusted content like any read's.
+    assert result.structured_content["data"]["title"] == {
+        "untrusted_content": "Resetting your VPN password"
+    }
 
 
 async def test_the_review_tool_carries_the_revision_through_mcp(wired) -> None:
