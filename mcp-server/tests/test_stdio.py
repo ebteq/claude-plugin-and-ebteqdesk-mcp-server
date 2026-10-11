@@ -52,6 +52,12 @@ EXPECTED_TOOLS = {
     "list_kb_tree",
     "list_kb_categories",
     "list_kb_folders",
+    # The four Warni Activity reads. Over the wire as well as in-process;
+    # the POS ingest that feeds them is deliberately absent from both.
+    "activity_list",
+    "activity_summary",
+    "activity_list_dormant",
+    "activity_get_customer",
     # Writes
     "create_ticket",
     "comment_on_ticket",

@@ -624,4 +624,49 @@ __all__ = ["__version__"]
 #: ⚠️ THE PLUGIN'S SKILLS WERE EDITED WHERE THEY NAME AN ENVELOPED FIELD, AND
 #: THEIR "VERIFIED AGAINST" LINES WERE NOT MOVED. Per the 3.0.0 entry above,
 #: that line asserts a full re-read, and this release did not do one.
-__version__ = "5.0.0"
+#:
+#: 5.1.0 — WARNI ACTIVITY. Four READ tools ADDED, and still the ordinary
+#: minor this file has made since 1.1.0: nothing an existing caller wrote can
+#: break. Every tool present at 5.0.0 keeps the same name, arguments, defaults
+#: and return shape.
+#:
+#: WHAT MOVED: `activity_list`, `activity_summary`, `activity_list_dormant` and
+#: `activity_get_customer` read `GET /api/v1/activity*` — the daily per-business
+#: Warni POS usage report, scored 0..5 by how many of five modules a business
+#: used. The tool list goes forty-three -> forty-seven and reads twenty-one ->
+#: twenty-five; the twenty-two writes and the twenty-seven tools needing a
+#: write scope do not move. One new scope, `activity:read`, backed by `reports.view`
+#: and covered by a legacy `*` key.
+#:
+#: 🔴 THE PLAN IS `all`, NOT `free`. The server (PRs #334/#335, 2026-10-11)
+#: stopped receiving a push and now PULLS every business's usage from Warni's
+#: InternalOperation API once an hour, filing it under the plan code `all`
+#: ("All businesses") because Warni exposes no plan. `plan` defaults to `all`
+#: on all four tools; `all` is a stored code, NOT a wildcard; `free` survives
+#: only as the code the old push wrote and reads just those legacy days. Every
+#: response carries `meta.plan_label`. An EMPTY report means no activity is
+#: stored (Warni Activity unconfigured or paused, or no pull yet), not zero use.
+#:
+#: 🔴 THE WRITE AND THE FETCH ARE DELIBERATELY ABSENT. `POST /api/v1/activity/
+#: daily` (the old machine push, `activity:write`) overwrites a whole day of
+#: every business's activity, and "Fetch from Warni" is an admin-only web
+#: action that holds a PHP worker for minutes; neither is an agent's action.
+#:
+#: ALL FOUR CARRY `READ_ONLY` ANNOTATIONS, and the three that return a business
+#: name -- `activity_list`, `activity_list_dormant`, `activity_get_customer` --
+#: envelope it as `{"untrusted_content": "..."}` beside the top-level
+#: `untrusted_content_notice`, exactly as 5.0.0 does for ticket text: the name
+#: is typed into a third-party POS. `business_id` is NOT wrapped, by 5.0.0's own
+#: line: it is an identifier a caller must pass back verbatim to
+#: `activity_get_customer`, and the server confines it to ASCII letters, digits,
+#: `_`, `.` and `-`. `activity_summary` returns no free text and is not wrapped.
+#:
+#: ⚠️ THESE FOUR VALIDATE LOCALLY, UNLIKE THE TICKET LISTS. Enums (period,
+#: tier, sort) are `Literal`s and the numeric ranges (days 1..90, scores 0..5,
+#: per_page 1..100, Y-m-d dates, the route's business-id pattern) are refused
+#: in client.py before a request. The reasoning that keeps `per_page` on the
+#: ticket lists server-only — a local rule that could disagree with the server
+#: per ROLE — does not apply: this vocabulary is fixed in the server's code and
+#: identical for every caller. `plan` is still passed through, because its
+#: legal values are server CONFIG.
+__version__ = "5.1.0"

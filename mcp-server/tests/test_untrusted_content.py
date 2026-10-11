@@ -505,6 +505,11 @@ ENVELOPING_TOOLS = [
     "close_ticket",
     "propose_kb_article",
     "update_kb_article",
+    # Warni Activity (5.1.0): `business_name` is typed into a third-party POS.
+    # `activity_summary` is deliberately absent -- it returns no free text.
+    "activity_list",
+    "activity_list_dormant",
+    "activity_get_customer",
 ]
 
 

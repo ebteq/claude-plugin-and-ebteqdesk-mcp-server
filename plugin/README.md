@@ -7,14 +7,16 @@ Four Claude Code skills for working an Ebteqdesk helpdesk through its MCP server
 | `ebteqdesk:tickets` | List and read tickets (own queue, or the whole account with `scope="all"`), the full conversation, attachments, reply, internal notes, move a ticket between working states or reopen one, change or clear a ticket's type, open a ticket, close one |
 | `ebteqdesk:escalations` | The shared escalation queue, reading and replying on escalated tickets, escalate, de-escalate, close |
 | `ebteqdesk:knowledge-base` | Search and read articles (including per-language versions), the category/folder tree across Ebteqdesk's two knowledge bases (Salon V3 and Warni), propose and update articles, check a review verdict or the proposal queue, upload and embed screenshots, create/delete categories and folders, reorder |
-| `ebteqdesk:reports` | The account-wide ticket report and the per-category escalation report |
+| `ebteqdesk:reports` | The account-wide ticket report, the per-category escalation report, and the Warni POS activity score (summary first, then the dormant-customer review) |
 
 **Each `SKILL.md` carries its own "Verified against `ebteqdesk-mcp`" line.**
 If the server you are connected to reports a different version in
 `serverInfo.version`, treat that skill as possibly stale.
 
-✅ **All four skills have now been fully re-read against `4.3.0` (42 tools),
-and all four lines say so.** The first pass (`knowledge-base` only) left the
+✅ **All four skills have now been fully re-read against `4.3.0` (42 tools).
+Two lines say so; `reports` says `5.1.0` (47 tools), because 5.1.0 added the
+four Warni Activity reads and only that skill covers them. The 5.1.0 change touches
+none of the other skills.** The first pass (`knowledge-base` only) left the
 other three at `1.6.0` on a spot check that only compared tool *signatures* —
 which is exactly the check this project's own retrospective on that pass
 warned was not enough, since neither of the two worst items the KB pass found
