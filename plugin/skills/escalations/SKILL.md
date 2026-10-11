@@ -88,7 +88,8 @@ survey:
 
 It cannot reach `4` or `5`; that is `close_ticket`, the only tool that can send
 the survey. ✅ Sending a status the ticket already holds is a **no-op and safe to
-retry** — one of only two writes on this server with that property. Reopening
+retry** — one of only three writes on this server with that property (the
+others are `set_ticket_category` and `reorder_kb_children`). Reopening
 (`status=2`) additionally costs the `ticket.close` ability.
 
 **An escalated ticket needs nothing extra here.** See the table above.

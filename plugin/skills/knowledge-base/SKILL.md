@@ -562,7 +562,8 @@ previous list, which you can only do if you read it first. Reordering changes
 what every agent sees, and on a public folder what every customer sees.
 
 ✅ It is, however, **idempotent**: positions are assigned by index, so replaying
-the same call leaves the same order. It and `set_ticket_status` are the only two
-writes on this server that are safe to retry.
+the same call leaves the same order. It, `set_ticket_status` and
+`set_ticket_category` are the only three writes on this server that are safe to
+retry.
 
 Show the user the before-and-after order, and send only once they agree.

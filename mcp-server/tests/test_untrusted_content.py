@@ -294,6 +294,7 @@ async def test_every_ticket_list_wraps_the_subject_and_the_requester_name(
         ("escalate_ticket", {"ticket_id": 42}),
         ("de_escalate_ticket", {"ticket_id": 42}),
         ("set_ticket_status", {"ticket_id": 42, "status": 2}),
+        ("set_ticket_category", {"ticket_id": 42, "category": "admin"}),
         ("close_ticket", {"ticket_id": 42}),
     ],
 )
@@ -500,6 +501,7 @@ ENVELOPING_TOOLS = [
     "escalate_ticket",
     "de_escalate_ticket",
     "set_ticket_status",
+    "set_ticket_category",
     "close_ticket",
     "propose_kb_article",
     "update_kb_article",

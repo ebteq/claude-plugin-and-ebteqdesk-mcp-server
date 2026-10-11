@@ -111,7 +111,7 @@ class Config:
 
     Kept as the raw string on purpose and validated only when `upload_kb_media`
     runs (`client._upload_root`). A missing or mistyped directory must cost the
-    ONE tool that reads local files, not all forty-two — validating it here would
+    ONE tool that reads local files, not all forty-three — validating it here would
     turn "the upload folder was deleted" into "the server cannot list tickets".
     None means uploads are turned off, which is the default.
     """
