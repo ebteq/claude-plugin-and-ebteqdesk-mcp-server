@@ -571,9 +571,15 @@ class NotFoundError(ApiError):
     are escalated.
 
     So a 404 from `comment_on_ticket`, `add_private_note`, `close_ticket`,
-    `set_ticket_status` or the escalate pair means "this key cannot act on that
-    id", never "that id is free". Do not report a ticket as deleted on the
-    strength of one, and do not retry: nothing about it is transient.
+    `set_ticket_status`, `set_ticket_category` or the escalate pair means "this
+    key cannot act on that id", never "that id is free". Do not report a ticket
+    as deleted on the strength of one, and do not retry: nothing about it is
+    transient.
+
+    ⚠️ ONE MORE CAUSE ON `set_ticket_category` ALONE: an Ebteqdesk install
+    that predates PUT /tickets/{id}/category has no such route and 404s (or
+    405s) every id. Nothing in the body distinguishes that from the ownership
+    404, so it is documented on the tool rather than detected here.
 
     `ticket_write_not_found()` adds that sentence to the message when the
     account's own scopes make the own-ticket case a live possibility.

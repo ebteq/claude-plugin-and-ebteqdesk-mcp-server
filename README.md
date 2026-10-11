@@ -117,7 +117,7 @@ your host reports at connect time, treat these skills as possibly stale and trus
 tool descriptions over them.
 
 ⚠️ **Right now it does not match, and this is exactly where the gap is.** The server in
-this repository is **4.2.0, with 42 tools**. The skills have **not** been re-verified
+this repository is **4.4.0, with 43 tools**. The skills have **not** been re-verified
 against it — that is outstanding work in its own right, not something the repository merge
 did or could do. The known gaps:
 

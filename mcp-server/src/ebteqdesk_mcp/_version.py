@@ -505,4 +505,38 @@ __all__ = ["__version__"]
 #: description that materially changes is this file's rule for a minor same as
 #: an argument gaining one, and this is the entry most likely to explain a
 #: support ticket: "reordering categories used to work and now 422s".
-__version__ = "4.3.0"
+#:
+#: 4.4.0 — THE TICKET TYPE BECOMES WRITABLE AFTER CREATE. ONE tool ADDED
+#: (`set_ticket_category`, over Ebteqdesk PR #261's
+#: `PUT /api/v1/tickets/{id}/category`), taking the server from forty-two to
+#: forty-three and its write half from twenty-one to twenty-two; the read half
+#: stays at twenty-one. A MINOR, on the same claim as every minor above it:
+#: every tool present in 4.3.0 keeps the same name, arguments, defaults and
+#: return shape, so nothing an existing caller wrote can break.
+#:
+#: WHAT ELSE MOVED IS DESCRIPTION, NOT CONTRACT. `create_ticket` now says that
+#: `category` (a slug) is the ONLY way to set the type on create, because the
+#: same server release refuses `type` / `ticket_type` / `ticket_type_id` on
+#: POST /api/v1/tickets with a 422 naming `category`. This client never sent
+#: any of the three, so no call it could make changes outcome — but a model
+#: that guessed an alias from the word "type" now gets a documented refusal
+#: rather than an undocumented one. `set_ticket_status`'s description, the
+#: module docstring and `instructions` stop calling it the ONE quiet ticket
+#: write and the retry-safe count goes from TWO to THREE.
+#:
+#: ✅ THE NEW TOOL IS THE QUIETEST WRITE ON THE SERVER. No mail, no
+#: notification, no domain event, and — unlike `set_ticket_status` — NO
+#: history entry, so it is safe to repeat and it is also UNAUDITED in the
+#: ticket thread. The first half is why it joins the retry-safe list; the
+#: second is why its description tells a model to read the old type before
+#: overwriting it.
+#:
+#: ⚠️ IT SHIPS AHEAD OF THE SERVER, AND THIS TIME THERE IS NO GUARD LIKE
+#: 4.3.0's `StalePortalApiError`. An install without PR #261 has no route at
+#: that path and answers 404 (or 405) for every id. That 404 has the same
+#: status as the ownership 404 the write surface already returns, and the only
+#: difference is server prose, which this package deliberately never parses
+#: (see `api_error_for`), so there is no field to check. The description says
+#: so instead, which is the fallback this file has always used for a fact the
+#: wire cannot carry.
+__version__ = "4.4.0"

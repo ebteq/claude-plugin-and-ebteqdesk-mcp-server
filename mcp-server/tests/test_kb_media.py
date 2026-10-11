@@ -479,4 +479,4 @@ async def test_the_instructions_carry_the_same_two_rules() -> None:
     assert "NEVER INVENT A `/kb/media/` URL" in instructions
     assert "reads the local filesystem" in instructions.lower()
     assert "`upload_kb_media`" in instructions
-    assert "TWENTY-ONE WRITE TOOLS" in instructions
+    assert "TWENTY-TWO WRITE TOOLS" in instructions

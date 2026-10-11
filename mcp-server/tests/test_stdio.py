@@ -58,11 +58,14 @@ EXPECTED_TOOLS = {
     "add_private_note",
     "escalate_ticket",
     "de_escalate_ticket",
-    # The only write on this server that emails nobody. Over the wire as well
+    # One of the two ticket writes that email nobody. Over the wire as well
     # as in-process: it and `close_ticket` split the status vocabulary between
     # them, and a client served only one of the pair would be able to resolve a
     # ticket and never reopen it.
     "set_ticket_status",
+    # The other quiet ticket write (4.4.0): sets or clears the ticket TYPE by
+    # slug, and leaves no history entry at all.
+    "set_ticket_category",
     "close_ticket",
     "propose_kb_article",
     "update_kb_article",

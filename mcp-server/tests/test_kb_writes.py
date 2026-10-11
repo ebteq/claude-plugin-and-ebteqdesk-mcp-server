@@ -29,8 +29,8 @@ of the DESCRIPTIONS as much as of the code:
 `get_kb_article_review` is gated on `kb:write` while changing nothing — and so
 are `list_kb_proposals`, `list_kb_tree`, `list_kb_categories` and
 `list_kb_folders` (tests/test_kb_proposals.py and tests/test_kb_structure.py),
-which is why the tool roster in test_server_tools counts SEVENTEEN writes and
-TWENTY-TWO write-scoped tools. That asymmetry is asserted rather than left as a
+which is why the tool roster in test_server_tools counts TWENTY-TWO writes and
+TWENTY-SEVEN write-scoped tools. That asymmetry is asserted rather than left as a
 comment.
 """
 
