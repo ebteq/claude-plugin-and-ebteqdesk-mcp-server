@@ -4,7 +4,7 @@ Four Claude Code skills for working an Ebteqdesk helpdesk through its MCP server
 
 | Skill | Covers |
 |---|---|
-| `ebteqdesk:tickets` | List and read tickets (own queue, or the whole account with `scope="all"`), the full conversation, attachments, reply, internal notes, move a ticket between working states or reopen one, change or clear a ticket's type, open a ticket, close one |
+| `ebteqdesk:tickets` | List and read tickets (own queue, or the whole account with `scope="all"`), the full conversation, attachments, attach a local file on an internal note, reply, internal notes, move a ticket between working states or reopen one, change or clear a ticket's type, open a ticket, close one |
 | `ebteqdesk:escalations` | The shared escalation queue, reading and replying on escalated tickets, escalate, de-escalate, close |
 | `ebteqdesk:knowledge-base` | Search and read articles (including per-language versions), the category/folder tree across Ebteqdesk's two knowledge bases (Salon V3 and Warni), propose and update articles, check a review verdict or the proposal queue, upload and embed screenshots, create/delete categories and folders, reorder |
 | `ebteqdesk:reports` | The account-wide ticket report, the per-category escalation report, and the Warni POS activity score (summary first, then the dormant-customer review) |
@@ -212,6 +212,22 @@ the point where they name those fields. Their "Verified against" lines still
 say what they said before (`4.3.0` for `escalations`, `reports` and
 `knowledge-base`; `4.4.0` for `tickets`) on purpose: per the rule above, a line moves only after a
 description-level re-read, and this release did not do one.
+
+⚠️ **`ebteqdesk-mcp` 5.1.0 added a tool, and the skills were edited for it
+WITHOUT a full re-read.** The server now has **43 tools**:
+`attach_file_to_ticket` sends a file from the user's own machine and files it on
+a new internal note. `tickets` and `escalations` each gained a section for it
+and a row in their scope-asymmetry table; `knowledge-base` now says the upload
+folder is shared between the two tools that read local files; `reports` did not
+change. What was checked is the text that was added, against the new tool's own
+description — not the rest of each file.
+
+🔴 **So all four "Verified against" lines still read `4.3.0 (42 tools)`, and
+the `42` is not a typo.** That line records the build a file was last read
+against, and the count in it is that build's. Moving it to `5.1.0 (43 tools)`
+on the strength of one added section would be exactly the bookkeeping bump the
+rule above forbids. Until the description-level re-read happens, the mismatch
+with `serverInfo.version` is the signal working as intended.
 
 ## Agent provisioning: nine tools, no skill
 

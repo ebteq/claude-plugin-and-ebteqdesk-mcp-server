@@ -320,8 +320,9 @@ def test_https_never_warns_even_with_the_override_set(capsys) -> None:
 
 
 def test_the_upload_root_is_read_verbatim_and_validated_later() -> None:
-    """Validated by `upload_kb_media`, not here: a deleted upload folder must
-    cost the one tool that reads files, not every tool on the server."""
+    """Validated by the two tools that read files — `upload_kb_media` and
+    `attach_file_to_ticket` — not here: a deleted upload folder must cost those
+    two, not every tool on the server."""
     config = Config.from_env(good_env(UPLOAD_ROOT="  ~/does-not-exist-yet  "))
 
     assert config.upload_root == "~/does-not-exist-yet"

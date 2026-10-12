@@ -117,7 +117,7 @@ your host reports at connect time, treat these skills as possibly stale and trus
 tool descriptions over them.
 
 ⚠️ **Right now it does not match, and this is exactly where the gap is.** The server in
-this repository is **5.1.0, with 47 tools**. The skills have **not** been re-verified
+this repository is **5.2.0, with 48 tools**. The skills have **not** been re-verified
 against it — that is outstanding work in its own right, not something the repository merge
 did or could do. The known gaps:
 
@@ -128,6 +128,7 @@ did or could do. The known gaps:
 | 4.1.0 | `propose_kb_article` and `update_kb_article` gained eight optional `en_*` / `zhcn_*` arguments so one call carries both languages. The skill's bilingual guidance predates them, and on a **published** article the old one-call-per-locale approach now *replaces* rather than accumulates — the second call drops the first language |
 | 4.2.0 | the nine agent-provisioning tools — `list_agents`, `get_agent`, `list_roles`, `list_groups`, `list_api_keys`, `create_agent`, `update_agent`, `issue_api_key`, `revoke_api_key`. No skill mentions any of them; four write, two return a secret exactly once, and none can be undone through the API |
 | 5.1.0 | ✅ the four Warni Activity read tools — `activity_summary`, `activity_list`, `activity_list_dormant`, `activity_get_customer`. **Covered:** the `reports` skill was written against them and says so (`Verified against 5.1.0`); plan `all` is the default and `free` is legacy history only |
+| 5.2.0 | `attach_file_to_ticket` — attaches a file from the user's own machine to a ticket, on a new internal note. **Covered:** `tickets` and `escalations` each gained a section for it, and `knowledge-base` says the upload folder is now shared. Added without a full re-read of those files, so their "Verified against" lines did not move — see [`plugin/README.md`](plugin/README.md) |
 
 What the skills *do* describe was checked against 1.6.0, and no tool that existed then has
 been renamed or removed, or changed the meaning of an argument a 1.6.0-era caller would

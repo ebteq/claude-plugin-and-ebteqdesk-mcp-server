@@ -1,6 +1,6 @@
 ---
 name: tickets
-description: Work Ebteqdesk support tickets — list or search the queue, open a ticket and read its full conversation, look at an attached screenshot, draft and send a reply to the customer, file an internal note, move a ticket between working states or reopen a resolved one, change or clear a ticket's type (category), open a new ticket, and close one. Use whenever the user asks about their tickets, the ticket queue, the status of a ticket or what is happening on one, a ticket number or reference, replying to a customer, putting a ticket on hold or waiting on the customer, reopening a ticket, recategorising a ticket or changing its type, or resolving/closing one.
+description: Work Ebteqdesk support tickets — list or search the queue, open a ticket and read its full conversation, look at an attached screenshot, attach a file from the user's machine to a ticket, draft and send a reply to the customer, file an internal note, move a ticket between working states or reopen a resolved one, change or clear a ticket's type (category), open a new ticket, and close one. Use whenever the user asks about their tickets, the ticket queue, the status of a ticket or what is happening on one, a ticket number or reference, replying to a customer, putting a ticket on hold or waiting on the customer, reopening a ticket, recategorising a ticket or changing its type, or resolving/closing one.
 ---
 
 # Ebteqdesk tickets
@@ -62,6 +62,7 @@ is the part that goes wrong, not the individual calls.
 |---|---|---|
 | Answer the customer | `comment_on_ticket(id, body)` | **Yes, always.** That is what it is for. |
 | Record something internal | `add_private_note(id, body)` | No |
+| Put a file on the ticket, internally | `attach_file_to_ticket(id, file_path, note)` | No — and the customer cannot see the file |
 | Park it on somebody internal | `set_ticket_status(id, 3)` — pending | No |
 | Park it on the customer | `set_ticket_status(id, 8)` — waiting on customer | No |
 | Pick it up, or **reopen** a resolved one | `set_ticket_status(id, 2)` — open | No |
@@ -167,6 +168,7 @@ state do not:
 |---|---|---|
 | `comment_on_ticket` | `ticket:write` + `ticket.reply` | **`escalation:write` + `escalation:read`** (and the `bp_escalation.reply` ability) |
 | `add_private_note` | `ticket:write` + `ticket.reply` | **`escalation:write` + `escalation:read`** (and the `bp_escalation.reply` ability) |
+| `attach_file_to_ticket` | `ticket:write` + `ticket.reply` | **`escalation:write` + `escalation:read`** (and the `bp_escalation.reply` ability) — it files a note, so it costs what a note costs |
 | `close_ticket` | `ticket:write` + `ticket.close` | **identical — no escalation branch at all** |
 | `set_ticket_status` | `ticket:write` + `ticket.reply` | **identical — no escalation branch at all** |
 | `set_ticket_category` | `ticket:write` + `ticket.reply` | **identical — no escalation branch at all** |
@@ -306,10 +308,71 @@ than guessing at a serial number or an error code. Read the response's
 shrunk, re-encoded screenshot can come back as a *larger* file than the
 original.
 
-⚠️ **Video attachments answer 415 and are never returned** — this tool serves
-images only. Check `mime_type` on the attachment first if you want to avoid
-the round trip, and tell the user the file needs to be opened in Ebteqdesk in
-a browser.
+⚠️ **Video and document attachments answer 415 and are never returned** — this
+tool serves images only, and a ticket can now carry PDFs, Office files, CSV,
+TXT and ZIP as well as video. Check `mime_type` on the attachment first if you
+want to avoid the round trip, and tell the user the file needs to be opened in
+Ebteqdesk in a browser.
+
+### Attaching a file
+
+`attach_file_to_ticket(ticket_id, file_path, note)` sends a file from the
+user's own machine and files it on a **new internal note**. The customer is
+never emailed and cannot see the file. **There is no tool that sends a file to
+the customer** — if that is what the user wants, say it has to be done in
+Ebteqdesk in a browser; do not reach for this tool and hope.
+
+🔴 **It reads the user's own disk.** Attach **only a file the user explicitly
+named, to the ticket they named.** Never sweep or list a directory looking for
+something suitable, and never guess at a path — if the one you were given does
+not exist, ask. It reads only inside the folder the operator set as
+`EBTEQDESK_UPLOAD_ROOT` — the same folder `upload_kb_media` uses — and refuses
+**every** call while that is unset. A file outside it means asking the user to
+copy it in and give you the new path, not trying another location.
+
+- **Accepted:** images (JPEG, PNG, GIF, WebP), video (MP4, MOV, WebM), and PDF,
+  Word, Excel, PowerPoint, CSV, TXT and ZIP, up to 20 MB. A video may be up to
+  500 MB where the desk has large uploads switched on.
+- **The desk checks the file's content, and for a document its extension as
+  well.** An image or a video is recognised from what it contains. A document
+  is accepted only when its extension is on that list **and** its content is
+  what that extension says — a plain-text log is accepted as `.txt` and refused
+  as `.log`, and a program renamed `.pdf` is refused whatever it is called. A
+  video over 20 MB also needs a video extension. **Never rename a file to
+  disguise what it is**, and never tell the user that renaming will get a
+  refused type accepted; the one rename worth suggesting is the honest one.
+- **One call is one file on one note**, and every note notifies the team and
+  the assignee. Five files are five notifications — say so before attaching a
+  batch.
+- **Not reversible.** No tool removes an attachment or a note.
+- `note` is optional. Without it the note reads `Attached file: <name>`.
+
+🔴 **A large video does not finish in one call.** If the result has a
+`transfer` key and no `attachment`, **nothing is attached yet.** Tell the user
+how far it has got (`bytes_sent` of `bytes_total`), then call the tool again
+**with exactly the same arguments** to check. Do not change the note or the
+path between calls — that is a different upload: refused while the first is
+still running, and filed as a **second note** once it has finished. The upload
+carries on between calls for as long as the MCP server is running and cannot be
+cancelled. An attempt still sending after 50 minutes is abandoned; one that the
+file store does not take is tried once more from the beginning, and only once.
+
+✅ **Safe to repeat with the same arguments.** The same file, to the same
+ticket, with the same note, is attached once — and "the same file" means **the
+same path, unchanged in size and modification time**. A copy somewhere else, or
+the file saved again, is a new file and gets a new note. `"replayed": true` in
+the receipt means it was already there and nothing new was written — say that,
+rather than reporting a second attachment.
+
+In the receipt `attachment.name` arrives as `{"untrusted_content": "…"}`, like
+the ticket's own text, and `attachment.url` opens with `get_ticket_attachment`
+only if the file is an image.
+
+⚠️ **This tool arrived in `ebteqdesk-mcp` 5.1.0 and needs an Ebteqdesk new
+enough to have the endpoint.** Against an older desk it answers "This Ebteqdesk
+has no ticket attachment endpoint" — that is the desk's version, not a missing
+ticket, so do not try another id. "Large videos are switched off" means files
+up to 20 MB still attach.
 
 ## Replying
 
@@ -334,8 +397,9 @@ went out or the note was recorded** — a null id means it was not.
 ⚠️ **`comment_on_ticket` only reaches a ticket assigned to your own account.**
 A shared-queue ticket assigned to somebody else refuses it with a 403 whose
 reason is `ticket_not_assigned` — not a scope problem, and not fixed by a new
-key. `add_private_note` is the one ticket write that reaches beyond your own
-queue (see the `escalations` skill); this one does not.
+key. `add_private_note` and `attach_file_to_ticket` are the two ticket writes
+that reach beyond your own queue (see the `escalations` skill); this one does
+not.
 
 Draft the reply, show it to the user, and send only once they have said yes.
 

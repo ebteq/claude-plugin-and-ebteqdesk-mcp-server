@@ -5,8 +5,10 @@ Five variables, no config file, no CLI flags:
     EBTEQDESK_API_TOKEN            required   an Ebteqdesk personal access token
     EBTEQDESK_BASE_URL             required   the site root, e.g. https://help.example.com
     EBTEQDESK_TIMEOUT              optional   per-request timeout in seconds (default 30)
-    EBTEQDESK_UPLOAD_ROOT          optional   the ONE directory `upload_kb_media` may
-                                              read from; unset means it reads nothing
+    EBTEQDESK_UPLOAD_ROOT          optional   the ONE directory the two file tools,
+                                              `upload_kb_media` and
+                                              `attach_file_to_ticket`, may read from;
+                                              unset means they read nothing
     EBTEQDESK_ALLOW_INSECURE_HTTP  optional   `1` lets the token travel over plain
                                               http to a non-loopback host
 
@@ -109,11 +111,12 @@ class Config:
     upload_root: str | None = None
     """`EBTEQDESK_UPLOAD_ROOT` as configured, or None.
 
-    Kept as the raw string on purpose and validated only when `upload_kb_media`
-    runs (`client._upload_root`). A missing or mistyped directory must cost the
-    ONE tool that reads local files, not all forty-seven — validating it here would
-    turn "the upload folder was deleted" into "the server cannot list tickets".
-    None means uploads are turned off, which is the default.
+    Kept as the raw string on purpose and validated only when one of the two
+    tools that read a local file runs — `upload_kb_media` or
+    `attach_file_to_ticket` (`client._upload_root`). A missing or mistyped
+    directory must cost those TWO tools, not all forty-eight — validating it
+    here would turn "the upload folder was deleted" into "the server cannot
+    list tickets". None means both are turned off, which is the default.
     """
 
     @property

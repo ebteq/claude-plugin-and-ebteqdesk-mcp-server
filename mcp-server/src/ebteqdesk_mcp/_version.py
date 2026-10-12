@@ -669,4 +669,94 @@ __all__ = ["__version__"]
 #: per ROLE — does not apply: this vocabulary is fixed in the server's code and
 #: identical for every caller. `plan` is still passed through, because its
 #: legal values are server CONFIG.
-__version__ = "5.1.0"
+#:
+#: 5.2.0 — A FILE ON A TICKET. ONE tool ADDED (`attach_file_to_ticket`), taking
+#: the server from 47 to 48 and its write half from 22 to 23, and nothing
+#: existing moved. Checked against the tool list rather than assumed: every tool
+#: present in 5.1.0 carries the same arguments, the same defaults and the same
+#: return shapes here, `close_ticket` still defaulting to 5. A MINOR on the rule
+#: every minor above it applies — code written against 5.1.0 cannot be calling a
+#: tool that did not exist in it. The counts that move with a write: 28 tools
+#: now need a write scope (was 27), and FOUR writes are safe to retry (was three).
+#:
+#: 🔴 IT IS THE SECOND TOOL THAT READS THE USER'S OWN FILESYSTEM, AND THE FIRST
+#: THAT COULD NOT HAVE SHIPPED BEFORE 5.0.0. `upload_kb_media` accepts six media
+#: types. This one accepts PDF, Word, Excel, PowerPoint, CSV, TXT and ZIP as
+#: well — most of what is worth taking off a disk — so on 4.3.0, where a local
+#: path was opened unrestricted, a model talked into naming the wrong one could
+#: have sent a spreadsheet from anywhere on the machine to a ticket. It is built
+#: on 5.0.0's upload root and reuses its two functions rather than a copy: one
+#: folder, `EBTEQDESK_UPLOAD_ROOT`, for both tools, and nothing read while it is
+#: unset. That is why this is a 5.x minor and was never going to be a 4.x: the tool
+#: depends on the control.
+#:
+#: ⚠️ THE UPLOAD-ROOT MESSAGES CHANGED WORDING, because every one of them named
+#: one tool and there are now two. "upload_kb_media is turned off" is
+#: "upload_kb_media and attach_file_to_ticket are turned off"; "Only
+#: upload_kb_media is affected" names both; the folder is described as holding
+#: files "meant to be sent to the desk", not "meant for the knowledge base". A
+#: message is not a contract, but anything matching the old sentences will stop
+#: matching.
+#:
+#: 🔴 THREE THINGS IN IT ARE NEW TO THIS PACKAGE, and each is a way of going
+#: wrong the earlier tools could not have had.
+#:
+#: (1) ONE REQUEST GOES TO A THIRD PARTY. A video over 20 MB is PUT straight to
+#: the desk's object store, at an address the desk signs for that one upload. It
+#: is sent by a SECOND HTTP client with no base URL, no default headers and no
+#: `Authorization` — the API token must never reach the store — and the address
+#: itself is a write credential until it expires, so it appears in no return
+#: value, no exception, no traceback and no log line. The last of those needed a
+#: log filter: the HTTP library logs every request URL at INFO and the SDK turns
+#: INFO on, to stderr, when the server is built.
+#:
+#: (2) A FILE IS STREAMED. `upload_kb_media` reads its file whole, which is right
+#: for a screenshot. Neither route here does: 500 MB is never in memory, and the
+#: idempotency key is made from `stat`, not from a pass over the bytes.
+#:
+#: (3) A TOOL'S WORK OUTLIVES ITS CALL. The transfer runs as a task detached
+#: from the tool call; a call waits at most 30 seconds and then answers with the
+#: receipt or with `{"transfer": {...}}`, and the same arguments find the same
+#: transfer again. That progress object is THE ONLY RESPONSE SHAPE THIS SERVER
+#: INVENTS — everything else is still the API's payload, enveloped. It exists
+#: because how long each MCP host keeps a tool call open could not be
+#: established, and a design that depended on the answer would have been a guess.
+#:
+#: ⚠️ ALSO NEW, AND ADDITIVE: three exception types (`UploadTransferError`,
+#: `StaleAttachmentApiError`, `DirectUploadUnavailableError`); `reason` and
+#: `retry_after` on every `ApiError`, where `retry_after` used to live on
+#: `RateLimitedError` alone; and `EbteqdeskClient` takes an `upload_transport`.
+#: THREE MESSAGES WERE CORRECTED because the new routes made them false: the 409
+#: that said no /api/v1 endpoint answers 409, and — for these routes only — the
+#: 413 that prescribed a smaller `max_dimension` and the 415 that said the
+#: endpoint returns images only. `get_ticket_attachment`'s own 415 now says the
+#: desk stores documents as well as video, which is the desk's change and not
+#: this tool's.
+#:
+#: 🔴 IT WAS WRITTEN AHEAD OF THE DESK IT TALKS TO, like 4.3.0 was: when the
+#: first version existed, the three `/api/v1/tickets/{id}/notes/…` routes did
+#: not, and it was exercised only against a fake of the desk and of the object
+#: store built from the contract (ADR 0011 in the desk's repository,
+#: "Amendment, 2026-10-09"). Against a desk without the routes the tool raises
+#: `StaleAttachmentApiError` — a 404 with no `error` key is the framework
+#: answering, not Ebteqdesk — rather than reporting a missing ticket.
+#:
+#: ✅ THE ROUTE FOR FILES UP TO 20 MB HAS SINCE BEEN RUN AGAINST A REAL DESK —
+#: the real client and the real tool, over real sockets, against a local stack:
+#: every accepted and refused type, the replay, a changed note, a 20 MB body
+#: streamed whole, the 413, the scope refusal, the 429 and the missing-route
+#: 404. The fake was corrected where the two had differed. 🔴 THE ROUTE FOR A
+#: VIDEO OVER 20 MB HAS NOT: that stack had direct uploads switched off, so the
+#: start call was seen to answer 501 and nothing past it — the signed address,
+#: the PUT to an object store and the completion — has met anything real.
+#:
+#: ⚠️ THE TOOL'S DESCRIPTION DEPARTS FROM THE ADR'S TEXT IN THREE PARAGRAPHS, on
+#: purpose. The ADR said the desk decides a type from content alone, that a
+#: changed note "starts a second upload", that an upload "gives up after 50
+#: minutes", "up to 20 MB each", and "the same file" without saying what same
+#: means. None of the five was true of the tool as built; the description says
+#: what is, and a test pins both the new sentences and the absence of the old.
+#:
+#: ⚠️ THE PLUGIN'S SKILLS GAINED THE TOOL AND THE NEW COUNT, AND THEIR "VERIFIED
+#: AGAINST" LINES WERE NOT MOVED — the same call 5.0.0 made, for the same reason.
+__version__ = "5.2.0"

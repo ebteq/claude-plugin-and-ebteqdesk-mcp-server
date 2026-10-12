@@ -43,7 +43,7 @@ READ_TOOL_NAMES = [
     # drafts; the three structure reads return the AUTHORING view — ids and
     # `agents`-only folders. Counting scopes and counting consequences give
     # different answers, and these are the tools where they differ:
-    # TWENTY-SEVEN tools need a write scope, TWENTY-TWO change state.
+    # TWENTY-EIGHT tools need a write scope, TWENTY-THREE change state.
     "get_kb_article_review",
     # 🔴 THE ONLY READ ON THIS SERVER THAT ENUMERATES DRAFTS, and the second
     # tool after `list_escalations` whose corpus is the whole INSTALLATION
@@ -104,6 +104,13 @@ WRITE_TOOL_NAMES = [
     # together further down so neither description can drift into the other's
     # claim.
     "add_private_note",
+    # 🔴 THE SECOND TOOL THAT READS THE USER'S OWN FILESYSTEM (5.1.0), and the
+    # first whose work outlives its own call. It files a LOCAL FILE on a new
+    # private note — never on a public reply, and no tool sends a file to the
+    # requester. It sits beside `add_private_note` because it reaches exactly
+    # the tickets that tool reaches, under the same scopes and abilities. Its
+    # own tests are in test_ticket_attachments.py.
+    "attach_file_to_ticket",
     "escalate_ticket",
     "de_escalate_ticket",
     # The WORKING-STATE change, and one of the two ticket writes that email
@@ -136,15 +143,16 @@ WRITE_TOOL_NAMES = [
     # tools would be three places for it to be stated and two places for it to
     # be softened.
     "reorder_kb_children",
-    # 🔴 THE ONLY TOOL ON THIS SERVER THAT READS THE USER'S OWN FILESYSTEM.
-    # Listed here because it writes, but the reason it needs its own review runs
-    # the other way: every other tool's worst case is a wrong write to the DESK,
-    # and this one can send a file OFF THE USER'S MACHINE. A second tool taking
-    # a local path arriving silently is exactly what this roster must catch.
+    # 🔴 THE FIRST OF THE TWO TOOLS THAT READ THE USER'S OWN FILESYSTEM — the
+    # other is `attach_file_to_ticket`, above. Listed here because it writes,
+    # but the reason it needs its own review runs the other way: every other
+    # tool's worst case is a wrong write to the DESK, and these two can send a
+    # file OFF THE USER'S MACHINE. A THIRD tool taking a local path arriving
+    # silently is exactly what this roster must catch.
     "upload_kb_media",
     # 🔴 THE FOUR PROVISIONING WRITES, AND THEY ARE A DIFFERENT KIND OF WRITE
-    # FROM EVERYTHING ABOVE THEM. The sixteen writes above change what the desk
-    # SAYS — a ticket, a note, an article, a folder. These change WHO MAY ACT:
+    # FROM EVERYTHING ABOVE THEM. The eighteen writes above change what the desk
+    # SAYS — a ticket, a note, a file on a note, an article, a folder. These change WHO MAY ACT:
     # they create accounts that can sign in, move people between roles, and
     # hand out bearer credentials.
     #
@@ -197,9 +205,10 @@ def wired(monkeypatch):
 
 #: 🔴 THE WRITES ANNOTATED `destructiveHint=True` (5.0.0). Conservative on
 #: purpose: anything that removes, overwrites, closes, revokes, creates an
-#: account or a credential, pages a team, or can send mail. The six writes NOT
-#: in this set are purely additive or lose nothing — a private note, a draft,
-#: a new category or folder, a reorder, a media upload. A write moving between
+#: account or a credential, pages a team, or can send mail. The seven writes NOT
+#: in this set are purely additive or lose nothing — a private note, a file on
+#: a new private note, a draft, a new category or folder, a reorder, a media
+#: upload. A write moving between
 #: the two halves is a reviewed decision, so the set is asserted whole.
 DESTRUCTIVE_WRITE_NAMES = {
     "create_ticket",
@@ -226,11 +235,16 @@ DESTRUCTIVE_WRITE_NAMES = {
 #: either of the two tools that can set it.
 OPEN_WORLD_WRITE_NAMES = {"comment_on_ticket", "close_ticket", "create_ticket"}
 
-#: The three writes the instructions call safe to retry — and no others.
+#: The four writes the instructions call safe to retry — and no others.
+#: `attach_file_to_ticket` joined them in 5.2.0: it sends an `Idempotency-Key`
+#: made from its own arguments, so the desk files the same file, ticket and
+#: note once. 🔴 `upload_kb_media` is NOT here and must not drift in beside it —
+#: both send a local file, and that one stores a new copy on every call.
 IDEMPOTENT_WRITE_NAMES = {
     "reorder_kb_children",
     "set_ticket_status",
     "set_ticket_category",
+    "attach_file_to_ticket",
 }
 
 
@@ -239,18 +253,19 @@ IDEMPOTENT_WRITE_NAMES = {
 # --------------------------------------------------------------------------- #
 
 
-async def test_exactly_the_forty_seven_tools_are_registered(tools) -> None:
+async def test_exactly_the_forty_eight_tools_are_registered(tools) -> None:
     assert sorted(tools) == sorted(TOOL_NAMES)
-    assert len(TOOL_NAMES) == 47
+    assert len(TOOL_NAMES) == 48
     # TWENTY-FIVE. Warni Activity took the READ half from 21 to 25 and left
     # the write half alone — no tool reaches the POS ingest.
     assert len(READ_TOOL_NAMES) == 25
-    # 🔴 TWENTY-TWO. Agent provisioning took the server from 33 to 42, the READ
+    # 🔴 TWENTY-THREE. Agent provisioning took the server from 33 to 42, the READ
     # half from 16 to 21 and the WRITE half from 17 to 21 — the first four
     # writes on this server that change WHO MAY ACT rather than what the desk
-    # says. 4.4.0's `set_ticket_category` made it 43 and 22. A twenty-third
-    # write arriving is what the test below exists to catch.
-    assert len(WRITE_TOOL_NAMES) == 22
+    # says. 4.4.0's `set_ticket_category` made it 43 and 22, and
+    # `attach_file_to_ticket` (5.2.0) is the twenty-third write. A
+    # twenty-fourth write arriving is what the test below exists to catch.
+    assert len(WRITE_TOOL_NAMES) == 23
 
 
 # --------------------------------------------------------------------------- #
@@ -319,16 +334,17 @@ async def test_only_the_tools_that_can_email_outside_are_open_world(tools) -> No
     assert open_world == OPEN_WORLD_WRITE_NAMES
 
 
-async def test_the_idempotent_hints_match_the_three_retry_safe_writes(tools) -> None:
-    """The instructions name exactly three writes as safe to retry. The hint and
-    the prose must name the same three, or a host and a model disagree about
+async def test_the_idempotent_hints_match_the_four_retry_safe_writes(tools) -> None:
+    """The instructions name exactly four writes as safe to retry. The hint and
+    the prose must name the same four, or a host and a model disagree about
     which call may be replayed."""
     idempotent = {name for name in WRITE_TOOL_NAMES if tools[name].annotations.idempotent_hint}
 
     assert idempotent == IDEMPOTENT_WRITE_NAMES
+    assert len(IDEMPOTENT_WRITE_NAMES) == 4
 
     instructions = " ".join((srv.mcp.instructions or "").split())
-    assert "exactly THREE exceptions" in instructions
+    assert "exactly FOUR exceptions" in instructions
     for name in IDEMPOTENT_WRITE_NAMES:
         assert f"`{name}`" in instructions
 
@@ -351,8 +367,8 @@ async def test_the_write_surface_is_exactly_these_twenty_two(tools) -> None:
     deleted: the point was never "no writes", it was that a write tool must be a
     deliberate act with a reviewed description, not something that appears.
 
-    An eighteenth write tool arriving silently — a publish, a bulk action,
-    another delete, another tool that reads a local path — should still fail
+    A twenty-third write tool arriving silently — a publish, a bulk action,
+    another delete, a THIRD tool that reads a local path — should still fail
     here. `publish` in particular: there is
     no publish endpoint on /api/v1 and adding one would defeat the KB review
     workflow, so a tool by that name appearing is exactly the thing this
@@ -412,6 +428,11 @@ async def test_argument_schemas(tools) -> None:
     # purpose, and a flag would make the requester-facing behaviour reachable by
     # forgetting a key.
     assert set(props("add_private_note")) == {"ticket_id", "body"}
+    # 🔴 A LOCAL PATH, as on `upload_kb_media` — and still no `private` flag and
+    # no `target`: the route says `notes`, so the file lands on an internal note
+    # and there is nothing to forget. The SDK's own context argument, which the
+    # tool takes to send progress, is NOT part of the schema.
+    assert set(props("attach_file_to_ticket")) == {"ticket_id", "file_path", "note"}
     assert set(props("escalate_ticket")) == {"ticket_id"}
     assert set(props("de_escalate_ticket")) == {"ticket_id"}
     assert set(props("set_ticket_status")) == {"ticket_id", "status"}
@@ -484,6 +505,8 @@ async def test_only_the_genuinely_required_arguments_are_required(tools) -> None
     assert required("create_ticket") == {"subject", "description", "requester"}
     assert required("comment_on_ticket") == {"ticket_id", "body"}
     assert required("add_private_note") == {"ticket_id", "body"}
+    # `note` is optional: the desk writes `Attached file: <name>` without one.
+    assert required("attach_file_to_ticket") == {"ticket_id", "file_path"}
     assert required("escalate_ticket") == {"ticket_id"}
     assert required("de_escalate_ticket") == {"ticket_id"}
     # 🔴 `status` IS REQUIRED HERE, unlike on close. There is no server-side
@@ -1048,18 +1071,25 @@ async def test_the_instructions_split_the_status_vocabulary_between_the_two_tool
     assert "`ticket.close`" in instructions
 
 
-async def test_the_instructions_name_all_three_retry_safe_writes(tools) -> None:
+async def test_the_instructions_name_all_four_retry_safe_writes(tools) -> None:
     """It was ONE for four releases, then TWO, and the instructions say so
     twice. A count that moves in one sentence and not the other is worse than
     no count — so both sentences are pinned, and both old counts are pinned
     ABSENT."""
     instructions = " ".join((srv.mcp.instructions or "").split())
 
-    assert "exactly THREE exceptions" in instructions
-    assert "only THREE writes here that are safe to retry" in instructions
+    assert "exactly FOUR exceptions" in instructions
+    assert "only FOUR writes here that are safe to retry" in instructions
     assert "exactly TWO exceptions" not in instructions
     assert "only TWO writes here that are safe to retry" not in instructions
     assert "ONE write here that is safe to retry" not in instructions
+    assert "exactly TWO exceptions" not in instructions
+    assert "only TWO writes here that are safe to retry" not in instructions
+    assert "exactly THREE exceptions" not in instructions
+    assert "only THREE writes here that are safe to retry" not in instructions
+
+    for name in IDEMPOTENT_WRITE_NAMES:
+        assert f"`{name}`" in instructions
 
 
 async def test_the_server_instructions_flag_the_write_surface(tools) -> None:

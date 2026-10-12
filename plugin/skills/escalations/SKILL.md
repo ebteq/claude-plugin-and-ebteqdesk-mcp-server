@@ -65,6 +65,7 @@ that only move **state** do not:
 |---|---|---|
 | `comment_on_ticket` | `ticket:write` + `ticket.reply` | **`escalation:write` + `escalation:read`** (and the `bp_escalation.reply` ability) |
 | `add_private_note` | `ticket:write` + `ticket.reply` | **`escalation:write` + `escalation:read`** (and the `bp_escalation.reply` ability) |
+| `attach_file_to_ticket` | `ticket:write` + `ticket.reply` | **`escalation:write` + `escalation:read`** (and the `bp_escalation.reply` ability) — it files a note, so it costs what a note costs |
 | `close_ticket` | `ticket:write` + `ticket.close` | **identical — no escalation branch at all** |
 | `set_ticket_status` | `ticket:write` + `ticket.reply` | **identical — no escalation branch at all** |
 
@@ -174,8 +175,76 @@ raise `max_dimension` (1..4096) and retry rather than reporting a serial
 number or an error code you are not sure you read correctly. Read the
 `downscaled` flag it reports rather than comparing byte sizes — a shrunk,
 re-encoded screenshot can come back as a *larger* file, so file size is not
-evidence of fidelity. Video attachments answer 415 and are never returned;
-check `mime_type` first if you want to skip the round trip.
+evidence of fidelity. Video and document attachments answer 415 and are never
+returned — a ticket can now carry PDFs, Office files, CSV, TXT and ZIP as well
+as video; check `mime_type` first if you want to skip the round trip.
+
+### Attaching a file to an escalated ticket
+
+`attach_file_to_ticket(ticket_id, file_path, note)` sends a file from the
+user's own machine and files it on a **new internal note** — a log, an export,
+a screen recording of the fault. The customer is never emailed and cannot see
+the file, and **no tool sends a file to the customer**. On an escalation that
+is usually what you want: evidence for the team, not another message to an
+already-unhappy customer.
+
+It reaches exactly what `add_private_note` reaches — **any** escalated ticket
+`get_ticket` can read, including one assigned to somebody else — under the same
+two scopes and the same `bp_escalation.reply` ability. As with a note, do not
+use that reach to attach files to other people's tickets they have not asked
+for.
+
+🔴 **It reads the user's own disk.** Attach **only a file the user explicitly
+named, to the ticket they named.** Never sweep or list a directory looking for
+something suitable, and never guess at a path — if the one you were given does
+not exist, ask. It reads only inside the folder the operator set as
+`EBTEQDESK_UPLOAD_ROOT` — the same folder `upload_kb_media` uses — and refuses
+**every** call while that is unset. A file outside it means asking the user to
+copy it in and give you the new path, not trying another location.
+
+- **Accepted:** images (JPEG, PNG, GIF, WebP), video (MP4, MOV, WebM), and PDF,
+  Word, Excel, PowerPoint, CSV, TXT and ZIP, up to 20 MB. A video may be up to
+  500 MB where the desk has large uploads switched on.
+- **The desk checks the file's content, and for a document its extension as
+  well.** An image or a video is recognised from what it contains. A document
+  is accepted only when its extension is on that list **and** its content is
+  what that extension says — a plain-text log is accepted as `.txt` and refused
+  as `.log`, and a program renamed `.pdf` is refused whatever it is called. A
+  video over 20 MB also needs a video extension. **Never rename a file to
+  disguise what it is**, and never tell the user that renaming will get a
+  refused type accepted; the one rename worth suggesting is the honest one.
+- **One call is one file on one note**, and every note notifies the team and
+  the assignee. Five files are five notifications — say so before attaching a
+  batch.
+- **Not reversible.** No tool removes an attachment or a note.
+- `note` is optional. Without it the note reads `Attached file: <name>`.
+
+🔴 **A large video does not finish in one call.** If the result has a
+`transfer` key and no `attachment`, **nothing is attached yet.** Tell the user
+how far it has got (`bytes_sent` of `bytes_total`), then call the tool again
+**with exactly the same arguments** to check. Do not change the note or the
+path between calls — that is a different upload: refused while the first is
+still running, and filed as a **second note** once it has finished. The upload
+carries on between calls for as long as the MCP server is running and cannot be
+cancelled. An attempt still sending after 50 minutes is abandoned; one that the
+file store does not take is tried once more from the beginning, and only once.
+
+✅ **Safe to repeat with the same arguments.** The same file, to the same
+ticket, with the same note, is attached once — and "the same file" means **the
+same path, unchanged in size and modification time**. A copy somewhere else, or
+the file saved again, is a new file and gets a new note. `"replayed": true` in
+the receipt means it was already there and nothing new was written — say that,
+rather than reporting a second attachment.
+
+In the receipt `attachment.name` arrives as `{"untrusted_content": "…"}`, like
+the ticket's own text, and `attachment.url` opens with `get_ticket_attachment`
+only if the file is an image.
+
+⚠️ **This tool arrived in `ebteqdesk-mcp` 5.1.0 and needs an Ebteqdesk new
+enough to have the endpoint.** Against an older desk it answers "This Ebteqdesk
+has no ticket attachment endpoint" — that is the desk's version, not a missing
+ticket, so do not try another id. "Large videos are switched off" means files
+up to 20 MB still attach.
 
 ## Reading an escalated ticket
 
@@ -228,7 +297,8 @@ empty in substance — check it the same way.
 ⚠️ **A note on an escalated ticket needs the same two scopes** — plus the
 `bp_escalation.reply` ability. Not because the note would be exposed; it would
 not. Writing anything into a business-partner thread is a business-partner act.
-It is also the one ticket write that reaches **beyond your own queue**: it can
+It is also one of the two ticket writes that reach **beyond your own queue**
+(`attach_file_to_ticket` is the other, and reaches the same tickets): it can
 note on any ticket `get_ticket` can read, including a shared-queue ticket
 assigned to somebody else, which additionally needs `escalation:read`. Use that
 to record a finding on a ticket you are reviewing — not to leave notes on other

@@ -1,4 +1,7 @@
-"""POST /api/v1/kb/media — the one endpoint that reads a LOCAL FILE.
+"""POST /api/v1/kb/media — the first endpoint that reads a LOCAL FILE.
+
+(The second is the ticket attachment, in test_ticket_attachments.py, which goes
+through the same upload root and asserts the same cases for itself.)
 
 Two halves, and they guard different things.
 
@@ -317,8 +320,11 @@ async def test_an_unset_upload_root_reads_nothing_and_sends_nothing(
     assert ENV_UPLOAD_ROOT in message
     assert "is not set" in message
     assert "NOTHING WAS SENT TO EBTEQDESK" in message
-    # It must not read as "the server is broken": only this tool is affected.
-    assert "Only this tool is affected" in message
+    # It must not read as "the server is broken": only the two tools that read
+    # a local file are affected — and since 5.1.0 the message names BOTH, so a
+    # model does not go and try the other one.
+    assert "upload_kb_media and attach_file_to_ticket are turned off" in message
+    assert "Only upload_kb_media and attach_file_to_ticket are affected" in message
 
 
 @pytest.mark.parametrize(
@@ -488,7 +494,7 @@ async def test_an_unusable_root_names_itself_and_only_costs_uploads(
     assert recorded == []
     assert fragment in str(excinfo.value)
     assert ENV_UPLOAD_ROOT in str(excinfo.value)
-    assert "Only upload_kb_media is affected" in str(excinfo.value)
+    assert "Only upload_kb_media and attach_file_to_ticket are affected" in str(excinfo.value)
 
 
 async def test_a_root_that_is_a_file_is_refused(tmp_path) -> None:
@@ -799,6 +805,8 @@ async def test_the_instructions_carry_the_same_two_rules() -> None:
     instructions = " ".join((srv.mcp.instructions or "").split())
 
     assert "NEVER INVENT A `/kb/media/` URL" in instructions
-    assert "reads the local filesystem" in instructions.lower()
+    # Two tools read it since 5.1.0, and the sentence names both.
+    assert "two tools read the local filesystem" in instructions.lower()
     assert "`upload_kb_media`" in instructions
-    assert "TWENTY-TWO WRITE TOOLS" in instructions
+    assert "Never retry a timed-out `upload_kb_media`" in instructions
+    assert "TWENTY-THREE WRITE TOOLS" in instructions

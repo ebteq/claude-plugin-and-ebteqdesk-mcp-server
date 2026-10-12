@@ -16,6 +16,8 @@ Hierarchy:
     EbteqdeskError
     +- ConfigurationError        environment is wrong; no request was made
     +- LocalFileError            a LOCAL path could not be read; no request was made
+    +- UploadTransferError       a file's bytes did not reach the object store, or
+    |                            the transfer was abandoned; never quotes the URL
     +- TransportError            host unreachable, DNS failure, TLS error, timeout
     +- MalformedResponseError    a reply that is not the JSON this API promises
     +- StalePortalApiError       a `portal`-filtered read came back from an
@@ -30,13 +32,29 @@ Hierarchy:
        |                              escalation queue, and somebody else's
        +- PermissionError_       403  refused with no scope and no ability named
        +- NotFoundError          404
-       +- ConflictError          409  a state conflict. NO ENDPOINT PRODUCES ONE
-       |                              today — see the class
-       +- PayloadTooLargeError   413  the body is over a ceiling (two endpoints, two causes)
-       +- UnsupportedMediaError  415  the attachment is not an image (carries mime_type)
+       +- StaleAttachmentApiError 404 with NO `error` key on a ticket-attachment
+       |                              route: the desk predates the feature
+       +- ConflictError          409  a state conflict. Only the ticket-attachment
+       |                              routes produce one, each with a `reason`
+       +- PayloadTooLargeError   413  the body is over a ceiling (three endpoints,
+       |                              three causes)
+       +- UnsupportedMediaError  415  a download that is not an image, or an
+       |                              upload whose type the desk refuses
        +- InvalidRequestError    422  parameter validation, carries field errors
        +- RateLimitedError       429
+       +- DirectUploadUnavailableError 501  large uploads are switched off. NOT a
+       |                              ServerError: nothing is broken
        +- ServerError            5xx
+
+🔴 THE TICKET-ATTACHMENT ROUTES BRANCH ON `reason` (5.1.0). POST
+/api/v1/tickets/{id}/notes/attachments and the two `…/notes/uploads` routes are
+the first on this surface where one status has several meanings a machine must
+tell apart, so every refusal there carries a `reason` and `api_error_for`
+compares it as a VALUE — the same rule as `ticket_not_assigned`, and for the
+same reason: server sentences get rewritten. Three messages that were right for
+every other endpoint are wrong for these (the 409 that said no endpoint answers
+409, the 413 that prescribed a smaller `max_dimension`, the 415 that said the
+endpoint returns images only), and each now has its own branch.
 
 🔴 A 403 CARRYING `required_scope` DOES NOT SAY WHICH HALF FAILED.
 A scope resolves only while BOTH the key carries it and the owner's role backs
@@ -106,6 +124,7 @@ __all__ = [
     "EbteqdeskError",
     "ConfigurationError",
     "LocalFileError",
+    "UploadTransferError",
     "TransportError",
     "MalformedResponseError",
     "StalePortalApiError",
@@ -118,11 +137,13 @@ __all__ = [
     "TicketNotAssignedError",
     "PermissionError_",
     "NotFoundError",
+    "StaleAttachmentApiError",
     "ConflictError",
     "PayloadTooLargeError",
     "UnsupportedMediaError",
     "InvalidRequestError",
     "RateLimitedError",
+    "DirectUploadUnavailableError",
     "ServerError",
     "api_error_for",
     "diagnosed_scope_error",
@@ -131,6 +152,15 @@ __all__ = [
     "ESCALATION_WRITE_SCOPE",
     "MEDIA_UPLOAD_PATH",
     "NOT_ASSIGNED_REASON",
+    "REASON_KEY_REUSED",
+    "REASON_IN_PROGRESS",
+    "REASON_UPLOAD_INCOMPLETE",
+    "REASON_PAYLOAD_TOO_LARGE",
+    "REASON_UNSUPPORTED_MEDIA",
+    "REASON_SIZE_MISMATCH",
+    "REASON_DIRECT_UNAVAILABLE",
+    "REASON_STORAGE_UNAVAILABLE",
+    "is_ticket_attachment_path",
     "ESCALATION_REPLY_SCOPE",
     "TICKET_WRITE_SCOPE",
     "ticket_write_not_found",
@@ -184,6 +214,47 @@ NOT_ASSIGNED_REASON = "ticket_not_assigned"
 #: them. Kept as a VALUE next to the client method that sends it, not a regex.
 MEDIA_UPLOAD_PATH = "/api/v1/kb/media"
 
+#: The `reason` values the three ticket-attachment routes answer with, verbatim
+#: from ADR 0011 §A3. Compared as VALUES, never matched in `error`'s prose — see
+#: `NOT_ASSIGNED_REASON` above for why that rule has no exceptions here.
+#:
+#: Eight of them, and the status alone does not separate them: three share 409
+#: and mean "never retry", "wait two seconds" and "send the file again".
+REASON_KEY_REUSED = "idempotency_key_reused"
+REASON_IN_PROGRESS = "idempotency_in_progress"
+REASON_UPLOAD_INCOMPLETE = "upload_incomplete"
+REASON_PAYLOAD_TOO_LARGE = "payload_too_large"
+REASON_UNSUPPORTED_MEDIA = "unsupported_media_type"
+REASON_SIZE_MISMATCH = "upload_size_mismatch"
+REASON_DIRECT_UNAVAILABLE = "direct_upload_unavailable"
+REASON_STORAGE_UNAVAILABLE = "storage_unavailable"
+
+#: Where the ticket-attachment routes live. Three paths, told apart from every
+#: other ticket write by what follows the id:
+#:
+#:     /api/v1/tickets/{id}/notes/attachments
+#:     /api/v1/tickets/{id}/notes/uploads
+#:     /api/v1/tickets/{id}/notes/uploads/{upload_id}/complete
+#:
+#: VALUES, like `MEDIA_UPLOAD_PATH`, and compared with `startswith`/`endswith`
+#: rather than a pattern.
+_TICKET_PATH_PREFIX = "/api/v1/tickets/"
+_NOTE_ATTACHMENTS_SUFFIX = "/notes/attachments"
+_NOTE_UPLOADS_SEGMENT = "/notes/uploads"
+
+
+def is_ticket_attachment_path(path: str) -> bool:
+    """True for the three routes `attach_file_to_ticket` calls, and no other.
+
+    The second place this module tells endpoints apart by PATH (the first is
+    the 413 on `MEDIA_UPLOAD_PATH`). It is needed for the answers that carry no
+    `reason` to branch on: a 404 from a desk that has no such route at all, and
+    a 413 or 415 an intermediary produced before the application could add one.
+    """
+    return path.startswith(_TICKET_PATH_PREFIX) and (
+        path.endswith(_NOTE_ATTACHMENTS_SUFFIX) or _NOTE_UPLOADS_SEGMENT in path
+    )
+
 
 class EbteqdeskError(Exception):
     """Base class for everything this package raises deliberately."""
@@ -199,7 +270,12 @@ class LocalFileError(EbteqdeskError):
     🔴 THE FIRST FAILURE MODE IN THIS PACKAGE THAT IS NOT ABOUT EBTEQDESK AT
     ALL. Every other error here describes the environment, the network or the
     server; this one describes the caller's filesystem, and it exists because
-    `upload_kb_media` is the first tool that reads a local file.
+    two tools read a local file: `upload_kb_media`, and since 5.1.0
+    `attach_file_to_ticket`.
+
+    Raised only BEFORE anything is sent — that is what the message promises. A
+    file that changes or disappears once a transfer is under way is an
+    `UploadTransferError` instead, because by then "nothing was sent" is false.
 
     It is deliberately NOT a ConfigurationError. That class means "the
     environment is wrong" and its remedies are environment-shaped — set
@@ -224,6 +300,153 @@ class LocalFileError(EbteqdeskError):
             f"not go looking through nearby directories for something that "
             f"resembles it."
         )
+
+
+class UploadTransferError(EbteqdeskError):
+    """A file's bytes did not reach the desk's file store, or the transfer was
+    abandoned part-way. NOTHING WAS ATTACHED.
+
+    Raised only by `attach_file_to_ticket`. A video over 20 MB does not go
+    through /api/v1 at all: the desk hands out a short-lived upload address on
+    its object store, this client PUTs the file there, and only then asks the
+    desk to attach it. This class is every way that middle step ends without an
+    attachment, plus the one failure both transports share — the file changing
+    under the read.
+
+    🔴 THE UPLOAD ADDRESS IS A CREDENTIAL AND IT IS NEVER IN HERE. Anyone
+    holding that URL can write to the object until it expires, so it appears in
+    no message, no attribute and no chained exception of this class. A transport
+    failure is described by the TYPE of the exception that caused it, the status
+    code if the store answered, and how many bytes had gone — never by
+    `str(exc)`, because an HTTP library's messages quote the request URL.
+    `TransportError` below makes the same choice for the same reason; here it is
+    not caution, it is the control.
+
+    `kind` says which ending it was, as a value a caller can branch on:
+
+        put_failed       the store refused the PUT or the connection failed,
+                         again after one fresh attempt
+        deadline         the upload had not finished when its address was about
+                         to expire (50 minutes at most); it cannot resume
+        file_changed     the file's size or modification time moved while it
+                         was being read, so it was abandoned and the desk was
+                         NOT asked to attach it
+        expired          the desk had no pending upload left to complete, twice
+        incomplete       the desk saw no file after the store accepted one, twice
+        insecure_url     the address was not https://, so nothing was sent
+        malformed_start  the desk's answer held no usable address
+
+    Not an ApiError: in five of the seven the desk never answered with an error
+    at all, and a caller catching ApiError to read `status_code` would be
+    reading the object store's status as if it were the desk's.
+    """
+
+    PUT_FAILED = "put_failed"
+    DEADLINE = "deadline"
+    FILE_CHANGED = "file_changed"
+    EXPIRED = "expired"
+    INCOMPLETE = "incomplete"
+    INSECURE_URL = "insecure_url"
+    MALFORMED_START = "malformed_start"
+
+    def __init__(
+        self,
+        kind: str,
+        file_name: str,
+        *,
+        cause_type: str | None = None,
+        status_code: int | None = None,
+        bytes_sent: int = 0,
+        bytes_total: int = 0,
+    ) -> None:
+        self.kind = kind
+        self.file_name = file_name
+        #: The exception TYPE behind a failed PUT, e.g. "ConnectError". Never
+        #: its message — see the class docstring.
+        self.cause_type = cause_type
+        #: What the object store answered, if it answered. Not the desk's.
+        self.status_code = status_code
+        self.bytes_sent = bytes_sent
+        self.bytes_total = bytes_total
+
+        progress = f"{bytes_sent:,} of {bytes_total:,} bytes had been sent"
+
+        if kind == self.PUT_FAILED:
+            if status_code is not None:
+                cause = f"the file store answered {status_code}"
+            elif cause_type:
+                cause = f"the connection failed with {cause_type}"
+            else:
+                cause = "the file store did not accept it"
+
+            body = (
+                f"The upload of {file_name!r} to the desk's file store failed, "
+                f"and failed again on one fresh attempt ({cause}; {progress}). "
+                "NOTHING WAS ATTACHED and no note was written. This is a "
+                "network or file-store problem, not a problem with the ticket. "
+                "It is safe to call the tool again with exactly the same "
+                "arguments — the upload starts again from the beginning — but "
+                "if it fails the same way, stop and tell the user rather than "
+                "looping."
+            )
+        elif kind == self.DEADLINE:
+            body = (
+                f"The upload of {file_name!r} was abandoned because it had not "
+                f"finished before its upload address was due to expire "
+                f"({progress}). A large upload is allowed 50 minutes at most "
+                "and cannot resume. NOTHING WAS ATTACHED and no note was "
+                "written. The connection is too slow for a file this size: "
+                "about 1.4 Mbit/s sustained is needed for 500 MB. Tell the "
+                "user. Calling again starts from zero and meets the same limit "
+                "unless the connection is faster or the file is smaller."
+            )
+        elif kind == self.FILE_CHANGED:
+            body = (
+                f"The upload of {file_name!r} was abandoned because the file "
+                "changed, or could no longer be read, while it was being sent "
+                f"— its size or modification time moved ({progress}). NOTHING "
+                "WAS ATTACHED: the desk was not asked to attach a file that is "
+                "no longer the one that was named. Wait until whatever is "
+                "writing the file has finished, then call the tool again; the "
+                "file as it is now is sent as a new upload."
+            )
+        elif kind == self.EXPIRED:
+            body = (
+                f"The upload of {file_name!r} could not be completed: the desk "
+                "had no pending upload left for it, twice in a row — it expired "
+                "or was cleared before it could be attached. NOTHING WAS "
+                "ATTACHED. Attach the file again by calling the tool again with "
+                "the same arguments."
+            )
+        elif kind == self.INCOMPLETE:
+            body = (
+                f"The upload of {file_name!r} was sent twice and the desk "
+                "reported both times that no file had arrived. NOTHING WAS "
+                "ATTACHED. That points at the desk's file store rather than at "
+                "the file: tell the user, and have an administrator check it "
+                "before trying again."
+            )
+        elif kind == self.INSECURE_URL:
+            body = (
+                f"The upload of {file_name!r} was NOT SENT: Ebteqdesk answered "
+                "with an upload address that is not `https://`, and this "
+                "server sends a file's bytes only over an encrypted connection "
+                "— the same care the API token gets. NOTHING WAS SENT OR "
+                "ATTACHED. This is a fault in the desk's file-store "
+                "configuration and only an administrator can fix it. Do not "
+                "retry."
+            )
+        else:
+            body = (
+                f"The upload of {file_name!r} was NOT SENT: Ebteqdesk accepted "
+                "the request but its answer did not hold a usable upload "
+                "address in the documented shape. NOTHING WAS SENT OR "
+                "ATTACHED. This desk and this client disagree about the upload "
+                "contract — one of them is the wrong version. Do not retry; "
+                "tell the user. Files up to 20 MB do not use this path."
+            )
+
+        super().__init__(body)
 
 
 class TransportError(EbteqdeskError):
@@ -348,6 +571,12 @@ class ApiError(EbteqdeskError):
     come from different refusal points — but a client that had to know which
     subclass it held before it could read a field would make every `except
     ApiError` block start with an isinstance check.
+
+    `reason` and `retry_after` are carried the same way since 5.1.0. `reason` is
+    the body's own `reason` value — `ticket_not_assigned`, and the eight the
+    ticket-attachment routes answer with — and `retry_after` is the
+    `Retry-After` header, which those routes send on a 409 and a 503 as well as
+    on a 429. Both are what a caller branches on instead of the prose.
     """
 
     def __init__(
@@ -360,12 +589,20 @@ class ApiError(EbteqdeskError):
         required_scope: str | None = None,
         required_ability: str | None = None,
         field_errors: Mapping[str, Sequence[str]] | None = None,
+        reason: str | None = None,
+        retry_after: str | None = None,
     ) -> None:
         self.status_code = status_code
         self.path = path
         self.server_message = server_message
         self.required_scope = required_scope
         self.required_ability = required_ability
+        #: The body's `reason`, verbatim, or None. A value to compare, never
+        #: prose to read.
+        self.reason = reason
+        #: The `Retry-After` header as it arrived (seconds, as a string), or
+        #: None.
+        self.retry_after = retry_after
         self.field_errors: dict[str, list[str]] = {
             field: list(messages) for field, messages in (field_errors or {}).items()
         }
@@ -586,37 +823,82 @@ class NotFoundError(ApiError):
     """
 
 
+class StaleAttachmentApiError(ApiError):
+    """404 with NO `error` key on a ticket-attachment route — this Ebteqdesk has
+    no such endpoint. It predates the release that added it.
+
+    🔴 THE SIGNAL IS THE SHAPE OF THE BODY, NOT THE STATUS. Every 404 Ebteqdesk
+    itself writes on /api/v1 is `{"error": "<sentence>"}` — "There is no ticket
+    with the id 4" — because each v1 controller builds its refusals by hand. A
+    route that does not exist never reaches a controller: Laravel answers it
+    with its own `{"message": "The route … could not be found."}`, which has no
+    `error` key at all. So on these three paths, and only on them, a 404 without
+    that key means the ROUTE is missing rather than the ticket.
+
+    VERIFIED ON A RUNNING DESK, and pinned by a test on the desk's side: the
+    missing-route body is JSON for this client (it always sends `Accept:
+    application/json`), a debug build adds `exception`/`file`/`line`/`trace`
+    and still no `error`, and every 404 the three routes build themselves has
+    `error`. A 404 that is NOT JSON AT ALL is therefore not this — it is
+    something in front of the desk answering, and stays a
+    MalformedResponseError that says so.
+
+    The same idea as `StalePortalApiError` — a newer client meeting an older
+    desk, recognised from the one shape signal there is — and it exists for the
+    same reason: this client ships ahead of the desk it talks to. It is an
+    ApiError where that one is not, because here the desk did answer with an
+    error status and `status_code` and `path` mean what they say.
+
+    🔴 DELIBERATELY NOT A NotFoundError. A ticket write's 404 gets the
+    "this may be your own ticket" explanation appended (`ticket_write_not_found`),
+    and telling somebody their ticket may exist after all, about a desk that
+    simply has no such feature, is the confidently wrong advice this module
+    exists to avoid.
+
+    Nothing a caller can change fixes it: an administrator deploys the Ebteqdesk
+    release that adds the routes. Never retried.
+    """
+
+    #: Nothing about the request can change the outcome.
+    retriable = False
+
+
 class ConflictError(ApiError):
-    """409 — the write was refused because of the resource's current state.
+    """409 — refused because of something already recorded or still running.
 
-    🔴 NOTHING ON /api/v1 PRODUCES ONE TODAY, and this class is deliberately
-    kept anyway. Read both halves of that before deleting it or before writing
-    a message here that names an endpoint.
+    🔴 SINCE 5.1.0 THE TICKET-ATTACHMENT ROUTES ANSWER 409 THREE WAYS, AND
+    `reason` IS THE ONLY THING THAT TELLS THEM APART. The remedies are "never",
+    "in two seconds" and "send the file again", so one message for all three
+    would be wrong for two of them:
 
-    ITS ONE PRODUCER IS GONE. PATCH /api/v1/kb/articles/{reference} answered 409
-    for an article that had been PUBLISHED, on the reasoning that unpublishing
-    on edit would hand an integration a one-request takedown of any live help
-    article. That reasoning still stands and unpublishing is still impossible —
-    what changed is that the endpoint can now write the submitted text to a
-    pending REVISION without touching the live row, so the request is ACCEPTED
-    and staged, answering 202. See EbteqdeskClient.update_kb_article, and
-    KbArticleWritesController, whose own docblock says the 409 is gone from that
-    surface entirely.
+      idempotency_key_reused   the upload key was already used for a DIFFERENT
+                               file, ticket or note. Final — the same call gets
+                               the same answer for as long as the key lives.
+      idempotency_in_progress  the same request is still being processed. Wait
+                               `retry_after` seconds and repeat it.
+      upload_incomplete        the desk was asked to attach an upload whose
+                               file has not arrived at the object store.
 
-    IT IS KEPT FOR TWO REASONS. It is exported from the package root, so
-    removing it breaks an `except ConflictError` in anyone using the HTTP half
-    directly; and `api_error_for` must still classify a 409 as something, since
-    a proxy or a future endpoint can emit one. What it must NOT do is keep
-    teaching the removed rule — a message asserting "the article is published"
-    would be a confident, wrong diagnosis of whatever the next 409 actually is.
+    `EbteqdeskClient` absorbs the last two inside the transfer — it waits, or
+    sends the file again — so `attach_file_to_ticket` normally surfaces only the
+    first.
 
-    So: this is now the generic state conflict. The server's own sentence is
-    the only thing that knows what it means; do not retry blindly, and read it.
+    A 409 CARRYING NO `reason` IS NOT ONE OF THESE, and gets the generic message:
+    a proxy in front of Ebteqdesk, or an endpoint newer than this client. The
+    server's own sentence is then the only thing that knows what conflicted.
+
+    HISTORY, AND WHY THE GENERIC MESSAGE STILL MENTIONS THE KNOWLEDGE BASE. This
+    class's first producer was PATCH /api/v1/kb/articles/{reference}, which
+    answered 409 for a PUBLISHED article. That endpoint now stages the edit as a
+    pending REVISION and answers 202 (see EbteqdeskClient.update_kb_article), so
+    for four releases nothing produced a 409 and the message said so. It must
+    not go back to teaching the removed rule: "the article is published" would
+    be a confident, wrong diagnosis of whatever the next unexplained 409 is.
     """
 
 
 class PayloadTooLargeError(ApiError):
-    """413 — a body was over a ceiling. TWO endpoints raise it for OPPOSITE
+    """413 — a body was over a ceiling. THREE endpoints raise it for THREE
     reasons, and the message is the only thing that tells them apart.
 
     DOWNLOAD — GET /api/v1/attachments/{id} downscales before it returns and
@@ -625,41 +907,65 @@ class PayloadTooLargeError(ApiError):
     Worth retrying with a SMALLER `max_dimension`, which is the whole reason
     this is a class of its own rather than the generic ApiError fallthrough.
 
-    UPLOAD — POST /api/v1/kb/media, where the REQUEST was too large for nginx's
-    `client_max_body_size` or PHP's `post_max_size` and was cut off before the
-    application saw it. There is no argument that changes the outcome and no
-    field errors to read: the per-kind cap that produces a helpful 422 lives in
-    App\\Kb\\MediaRules, one layer further in, and this request never got there.
-    The only remedy is a smaller file.
+    KB UPLOAD — POST /api/v1/kb/media, where the REQUEST was too large for
+    nginx's `client_max_body_size` or PHP's `post_max_size` and was cut off
+    before the application saw it. There is no argument that changes the outcome
+    and no field errors to read: the per-kind cap that produces a helpful 422
+    lives in App\\Kb\\MediaRules, one layer further in, and this request never
+    got there. The only remedy is a smaller file.
 
-    🔴 So the remedies are OPPOSITE — "retry with a smaller argument" against
-    "there is nothing to retry" — which is why `api_error_for` branches on the
-    path. One message for both would send an uploader into a retry loop with an
-    argument that endpoint does not have.
+    TICKET ATTACHMENT (5.1.0) — the three `…/notes/` attachment routes, where
+    the APPLICATION refuses with `reason: "payload_too_large"` and names the
+    limit in `max_bytes`: 20,971,520 for a file sent through the API,
+    524,288,000 for a video sent to the object store. Nothing to retry here
+    either, but unlike the KB upload the number is known and is in the message.
 
-    ⚠️ On the upload side a 413 may also arrive as HTML from nginx rather than
-    JSON from Laravel, in which case it surfaces as MalformedResponseError
+    🔴 So the remedies differ — "retry with a smaller argument" against "there
+    is nothing to retry" — which is why `api_error_for` branches on the path and
+    on `reason`. One message for all three would send an uploader into a retry
+    loop with an argument that endpoint does not have.
+
+    ⚠️ On either upload side a 413 may also arrive as HTML from nginx rather
+    than JSON from Laravel, in which case it surfaces as MalformedResponseError
     instead. That is nginx answering before PHP runs at all, and the snippet in
     that message says so.
     """
 
+    def __init__(self, *args: Any, max_bytes: int | None = None, **kwargs: Any) -> None:
+        #: The limit the desk named, in bytes. Only the ticket-attachment
+        #: routes send one; None everywhere else.
+        self.max_bytes = max_bytes
+        super().__init__(*args, **kwargs)
+
 
 class UnsupportedMediaError(ApiError):
-    """415 — the attachment is not an image, so no bytes are returned.
+    """415 — a type the endpoint will not handle. Two endpoints, two directions.
 
-    Ebteqdesk accepts video attachments (`video/mp4`, `video/quicktime`,
-    `video/webm`) alongside images, and this endpoint serves images ONLY. A
-    video's bytes are never returned under an image content type: a client that
-    base64'd an MP4 into a vision request would get a decode failure at best and
-    a confidently wrong answer at worst.
+    DOWNLOAD — GET /api/v1/attachments/{id} serves images ONLY. Ebteqdesk
+    accepts video (`video/mp4`, `video/quicktime`, `video/webm`) and, since the
+    release that added ticket attachments over the API, documents (PDF, Office,
+    CSV, TXT, ZIP) alongside images, and none of those bytes is ever returned
+    under an image content type: a client that base64'd an MP4 into a vision
+    request would get a decode failure at best and a confidently wrong answer
+    at worst. `mime_type` carries what the row actually is, so a caller can tell
+    "this is a video" from "this file is broken" without another request. It is
+    None only if the server omitted the field.
 
-    `mime_type` carries what the row actually is, so a caller can tell "this is
-    a video" from "this file is broken" without another request. It is None only
-    if the server omitted the field.
+    UPLOAD (5.1.0) — the ticket-attachment routes refuse a file whose type is
+    not on the desk's list, with `reason: "unsupported_media_type"`. `mime_type`
+    is None on this side: the desk does not say what it thinks the file is, it
+    says what it accepts, in `field_errors` — keyed `file` on the multipart
+    route and `mime_type` on the upload route — and that sentence is quoted in
+    the message.
 
-    NOT retryable in any form. There is no argument to this endpoint that makes
-    a video into an image; the file is readable by a human in the browser at its
-    ticket, and that is the only remedy.
+    NOT retryable in either direction. No argument to the download makes a
+    video into an image. The upload's verdict comes from the file's content —
+    and, for a document, from its extension as well: the desk accepts a
+    document only when its extension is on its list AND its content is what
+    that extension says. So a rename that disguises a file changes nothing,
+    and the one rename that helps is the honest one (a text log is accepted as
+    `.txt` and refused as `.log`). The completion route's 415 carries no
+    `field_errors` at all: it is the verdict on bytes already uploaded.
     """
 
     def __init__(self, *args: Any, mime_type: str | None = None, **kwargs: Any) -> None:
@@ -673,15 +979,47 @@ class InvalidRequestError(ApiError):
 
 
 class RateLimitedError(ApiError):
-    """429 — the /api throttle (60 requests/minute by default) tripped."""
+    """429 — the /api throttle (60 requests/minute by default) tripped.
 
-    def __init__(self, *args: Any, retry_after: str | None = None, **kwargs: Any) -> None:
-        self.retry_after = retry_after
-        super().__init__(*args, **kwargs)
+    `retry_after` is the header's value. It lived on this class alone until
+    5.1.0 and is now carried by `ApiError`, because the ticket-attachment routes
+    send the same header on a 409 and a 503.
+    """
+
+
+class DirectUploadUnavailableError(ApiError):
+    """501 `direct_upload_unavailable` — large videos are switched off here.
+
+    🔴 A 5xx THAT IS NOT A FAULT, WHICH IS WHY IT IS NOT A ServerError. The
+    generic 5xx message says something broke on the Ebteqdesk side and sends
+    the reader to the application logs. Nothing broke: sending a video over
+    20 MB needs an object store and an operator switch, this deployment has one
+    of them missing or off, and the desk said so in a status code that happens
+    to start with 5. A user told to check the logs for that would find nothing
+    in them.
+
+    The other half of the message matters as much: FILES UP TO 20 MB STILL
+    WORK. They take a different route that needs neither, so "attachments are
+    unavailable" would be wrong, and a model that concluded it would stop
+    offering to attach a PDF.
+
+    Never retried: the answer changes when an administrator changes the
+    deployment, not before.
+    """
+
+    #: Nothing about the request can change the outcome.
+    retriable = False
 
 
 class ServerError(ApiError):
-    """5xx — Ebteqdesk itself failed. Nothing the client can do differently."""
+    """5xx — Ebteqdesk itself failed. Nothing the client can do differently.
+
+    One 503 is narrower than that and says so in `reason`:
+    `storage_unavailable`, from the route that attaches an uploaded video, means
+    the desk could not reach its object store to verify the file. It is still a
+    fault on the desk's side — hence this class — but it is the one 5xx here
+    with a `retry_after` and a call that is safe to repeat.
+    """
 
 
 def api_error_for(
@@ -729,6 +1067,15 @@ def api_error_for(
     Server prose is not an interface: it has already been rewritten once, and a
     client that regex'd it would have broken silently and started giving
     confidently wrong advice.
+
+    THE TICKET-ATTACHMENT ROUTES ADD A SECOND FORK, ON `reason` (5.1.0). Those
+    three routes answer 409 three ways and reuse 413, 415, 422, 501 and 503 for
+    things the older messages do not describe, so each of those statuses tests
+    `reason` — a VALUE, compared to a constant — before falling through to what
+    it always said. Two answers on those routes carry no `reason` to compare and
+    are recognised by the PATH instead, exactly as the KB upload's 413 already
+    is: a 404 with no `error` key (the route does not exist on this desk), and a
+    413 or 415 from something in front of the application.
     """
     server_message = payload.get("error")
     if not isinstance(server_message, str):
@@ -745,6 +1092,12 @@ def api_error_for(
     field_errors = payload.get("errors")
     if not isinstance(field_errors, Mapping):
         field_errors = {}
+
+    reason = payload.get("reason")
+    if not isinstance(reason, str) or not reason:
+        reason = None
+
+    attachment_route = is_ticket_attachment_path(path)
 
     detail = f" Ebteqdesk said: {server_message}" if server_message else ""
 
@@ -780,6 +1133,7 @@ def api_error_for(
             status_code=status_code,
             path=path,
             server_message=server_message,
+            reason=reason,
         )
 
     if status_code == 403 and required_scope:
@@ -834,6 +1188,49 @@ def api_error_for(
             server_message=server_message,
         )
 
+    if status_code == 404 and attachment_route and "error" not in payload:
+        # 🔴 The KEY's absence, not the sentence's content. Ebteqdesk's own 404
+        # always has `error`; Laravel's answer for a route that does not exist
+        # has `message` and no `error`. See StaleAttachmentApiError.
+        return StaleAttachmentApiError(
+            "This Ebteqdesk has no ticket attachment endpoint. It predates the "
+            "release that added it. (It answered 404 for the attachment route "
+            "itself, in the framework's own shape and without the `error` "
+            "sentence every refusal Ebteqdesk writes carries.) THIS IS NOT A "
+            "MISSING TICKET, so do not report the ticket as absent and do not "
+            "try another id. NOTHING WAS ATTACHED, and nothing about the call "
+            "can change that: an administrator has to deploy the Ebteqdesk "
+            "release that adds file attachments to /api/v1. Until then a file "
+            "can be attached only by a person, in the browser, on the ticket. "
+            "Do not retry.",
+            status_code=status_code,
+            path=path,
+            server_message=server_message,
+        )
+
+    if status_code == 404 and attachment_route:
+        # WITH the `error` key, so Ebteqdesk's own — and on these routes it has
+        # two meanings the body tells apart only in its sentence, which is
+        # carried and never parsed. Both are said, so whichever it is, the
+        # reader is not sent the wrong way.
+        return NotFoundError(
+            "Ebteqdesk has nothing to attach this to, or nothing left of an "
+            "earlier attachment (404). NOTHING WAS ATTACHED. Its own sentence, "
+            "below, says which. If it names the TICKET, this key cannot reach a "
+            "ticket with that id — it does not exist, or it is not this "
+            "account's and not on the escalation queue; do not retry and do not "
+            "report the ticket as deleted. If it says the note and file NO "
+            "LONGER EXIST, this exact call succeeded once and what it attached "
+            "has since been removed on the desk; the desk still remembers the "
+            "call, so repeating it cannot put the file back. To attach it "
+            "afresh the call has to differ — a different note, or the file "
+            "saved again so that its modification time moves."
+            + detail,
+            status_code=status_code,
+            path=path,
+            server_message=server_message,
+        )
+
     if status_code == 404:
         return NotFoundError(
             "Ebteqdesk has nothing at that identifier (404)." + detail,
@@ -842,20 +1239,76 @@ def api_error_for(
             server_message=server_message,
         )
 
-    if status_code == 409:
+    if status_code == 409 and reason == REASON_KEY_REUSED:
         return ConflictError(
-            "Ebteqdesk refused this write because of the resource's current "
-            "state (409). 🔴 NO DOCUMENTED /api/v1 ENDPOINT ANSWERS 409, so this "
-            "is either a proxy in front of Ebteqdesk or an endpoint newer than "
-            "this client — read the server's own message below, which is the "
-            "only thing that knows what conflicted. Retrying will not help "
-            "unless that message says what to change. Note in particular that a "
-            "PATCH of a PUBLISHED knowledge base article is NOT this: it no "
-            "longer refuses, it stages a pending revision and answers 202."
+            "Ebteqdesk refused this attachment (409): this file was already "
+            "sent with different details, so the desk will not file it again "
+            "under the same upload key. DO NOT RETRY — the same call gets the "
+            "same answer. The key is made from the ticket, the file's path, "
+            "its size, its modification time and the note text, so this means "
+            "the file's CONTENT changed while all of those stayed the same, or "
+            "an earlier attempt at the same call is recorded differently on "
+            "the desk. NOTHING NEW WAS ATTACHED. Read the ticket with "
+            "`get_ticket` to see what is already on it, and tell the user. If "
+            "the file really is a new version, saving it again — so that its "
+            "modification time moves — makes it a new upload."
             + detail,
             status_code=status_code,
             path=path,
             server_message=server_message,
+            reason=reason,
+            retry_after=retry_after,
+        )
+
+    if status_code == 409 and reason == REASON_IN_PROGRESS:
+        return ConflictError(
+            "Ebteqdesk is still processing an earlier copy of this same "
+            "request (409), and this client has already waited for it. Nothing "
+            "new was written by this call, and nothing has been lost. Call the "
+            "tool again with EXACTLY THE SAME ARGUMENTS in a few seconds: the "
+            "desk answers with the one finished attachment rather than a "
+            "second, and marks it `replayed`."
+            + detail,
+            status_code=status_code,
+            path=path,
+            server_message=server_message,
+            reason=reason,
+            retry_after=retry_after,
+        )
+
+    if status_code == 409 and reason == REASON_UPLOAD_INCOMPLETE:
+        return ConflictError(
+            "Ebteqdesk was asked to attach an upload whose file has not "
+            "arrived at its file store (409). NOTHING WAS ATTACHED and no note "
+            "was written. The file has to be sent again before the upload can "
+            "be completed."
+            + detail,
+            status_code=status_code,
+            path=path,
+            server_message=server_message,
+            reason=reason,
+            retry_after=retry_after,
+        )
+
+    if status_code == 409:
+        return ConflictError(
+            "Ebteqdesk refused this write because of the resource's current "
+            "state (409), and did not say which kind of conflict it was. The "
+            "only /api/v1 endpoints documented to answer 409 are the "
+            "ticket-attachment ones, and they always name a `reason`; this "
+            "body named none this client knows, so it is a proxy in front of "
+            "Ebteqdesk or an endpoint newer than this client — read the "
+            "server's own message below, which is the only thing that knows "
+            "what conflicted. Retrying will not help unless that message says "
+            "what to change. Note in particular that a PATCH of a PUBLISHED "
+            "knowledge base article is NOT this: it no longer refuses, it "
+            "stages a pending revision and answers 202."
+            + detail,
+            status_code=status_code,
+            path=path,
+            server_message=server_message,
+            reason=reason,
+            retry_after=retry_after,
         )
 
     if status_code == 413 and path.startswith(MEDIA_UPLOAD_PATH):
@@ -877,6 +1330,34 @@ def api_error_for(
             server_message=server_message,
         )
 
+    if status_code == 413 and (reason == REASON_PAYLOAD_TOO_LARGE or attachment_route):
+        max_bytes = payload.get("max_bytes")
+        if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
+            max_bytes = None
+
+        limit = (
+            f"The limit is {max_bytes:,} bytes ({max_bytes / 1_048_576:g} MB). "
+            if max_bytes
+            else ""
+        )
+
+        return PayloadTooLargeError(
+            "Ebteqdesk refused this file as too large (413). "
+            + limit
+            + "NOTHING WAS ATTACHED. There is nothing to retry: no argument "
+            "makes the file smaller, and sending it again gets the same "
+            "answer. Tell the user the limit and ask for a smaller file. Any "
+            "accepted type may be up to 20 MB; only a VIDEO may be larger, up "
+            "to 500 MB, and only where the desk has large uploads switched on."
+            + detail,
+            status_code=status_code,
+            path=path,
+            server_message=server_message,
+            field_errors=field_errors,
+            reason=reason,
+            max_bytes=max_bytes,
+        )
+
     if status_code == 413:
         return PayloadTooLargeError(
             "Ebteqdesk could not return this attachment within its response size "
@@ -892,27 +1373,105 @@ def api_error_for(
             server_message=server_message,
         )
 
+    if status_code == 415 and (reason == REASON_UNSUPPORTED_MEDIA or attachment_route):
+        # The desk's own list of what it accepts, quoted rather than restated:
+        # a second copy of that list here would be a rule that drifts.
+        accepted = " ".join(
+            str(message) for messages in field_errors.values() for message in messages
+        )
+
+        return UnsupportedMediaError(
+            "Ebteqdesk does not accept this file's type (415). "
+            + (
+                f"{accepted} "
+                if accepted
+                # The completion route refuses without listing anything: by
+                # then the file is on the object store and its CONTENT was not
+                # a video, whatever it was called.
+                else "It was read after it arrived and its content is not a "
+                "video the desk accepts, whatever its name says. "
+            )
+            + "NOTHING WAS ATTACHED, and nothing retries into success: the "
+            "same file gets the same answer. 🔴 THE DESK CHECKS THE FILE'S "
+            "CONTENT, AND FOR A DOCUMENT ITS EXTENSION AS WELL. An image or a "
+            "video is recognised from what it contains; a document must have "
+            "an extension on the list AND content that is what the extension "
+            "says. So a file renamed to disguise what it is stays refused — "
+            "do not rename one to get it past this, and do not tell the user "
+            "that will work. The one rename that helps is the honest one: a "
+            "plain-text log is accepted as `.txt` and refused as `.log`. A "
+            "file over 20 MB is accepted only if it is a video, and needs a "
+            "video extension. Tell the user which types are accepted and ask "
+            "for the file in one of them."
+            + detail,
+            status_code=status_code,
+            path=path,
+            server_message=server_message,
+            field_errors=field_errors,
+            reason=reason,
+        )
+
     if status_code == 415:
         mime_type = payload.get("mime_type")
         if not isinstance(mime_type, str) or not mime_type:
             mime_type = None
 
+        if mime_type is not None and mime_type.startswith("image/"):
+            # 🔴 An IMAGE type on a "not an image" refusal is not a
+            # contradiction to paper over: the desk records the type from the
+            # file's first bytes when it is attached, and refuses here when the
+            # bytes then fail to DECODE. Seen on a running desk with a PNG whose
+            # header was sound and whose data was not. The branch is on the
+            # `mime_type` FIELD — a value — never on the sentence. Without it
+            # the message below would read "this attachment is `image/png`, and
+            # that endpoint returns images only".
+            return UnsupportedMediaError(
+                f"This attachment is recorded as `{mime_type}`, but Ebteqdesk "
+                f"could not decode it as an image, so no image was returned "
+                f"(415). The file is damaged, cut short, or is not really the "
+                f"image its first bytes claim to be. NOTHING RETRIES INTO "
+                f"SUCCESS HERE: a different `max_dimension` decodes the same "
+                f"bytes. Tell the user the attachment could not be read as an "
+                f"image and that the original can be downloaded in the browser "
+                f"at its ticket — do not describe what it shows."
+                + detail,
+                status_code=status_code,
+                path=path,
+                server_message=server_message,
+                mime_type=mime_type,
+            )
+
         named = f"`{mime_type}`" if mime_type else "not an image"
 
         return UnsupportedMediaError(
             f"This attachment is {named}, and that endpoint returns images only "
-            f"(415). Ebteqdesk accepts video attachments as well as images, and a "
-            f"video's bytes are never served under an image content type — a "
-            f"decode failure is the best case and a confidently wrong reading of "
-            f"the wrong bytes is the worst. NOTHING RETRIES INTO SUCCESS HERE: no "
-            f"argument turns a video into an image. Tell the user the file is "
-            f"{mime_type or 'not an image'} and that it has to be opened in the "
-            f"browser at its ticket."
+            f"(415). Ebteqdesk accepts video and document attachments as well as "
+            f"images, and their bytes are never served under an image content "
+            f"type — a decode failure is the best case and a confidently wrong "
+            f"reading of the wrong bytes is the worst. NOTHING RETRIES INTO "
+            f"SUCCESS HERE: no argument turns a video or a document into an "
+            f"image. Tell the user the file is {mime_type or 'not an image'} and "
+            f"that it has to be opened in the browser at its ticket."
             + detail,
             status_code=status_code,
             path=path,
             server_message=server_message,
             mime_type=mime_type,
+        )
+
+    if status_code == 422 and reason == REASON_SIZE_MISMATCH:
+        return InvalidRequestError(
+            "The file that reached the desk's file store was not the size that "
+            "was declared for it (422), so the desk discarded it. That is what "
+            "a file changing while it is being sent looks like from the other "
+            "end. NOTHING WAS ATTACHED and no note was written. Wait until "
+            "nothing is still writing the file, then call the tool again."
+            + detail,
+            status_code=status_code,
+            path=path,
+            server_message=server_message,
+            field_errors=field_errors,
+            reason=reason,
         )
 
     if status_code == 422:
@@ -930,6 +1489,28 @@ def api_error_for(
             field_errors=field_errors,
         )
 
+    if status_code == 429 and attachment_route:
+        # 🔴 Classified by STATUS, deliberately. A throttled request never
+        # reaches a controller, so the body is the framework's
+        # `{"message": "Too Many Attempts."}` with no `error` key and no
+        # `reason` — there is nothing else to branch on, and nothing is needed.
+        wait = f" Wait {retry_after}s first." if retry_after else ""
+        return RateLimitedError(
+            "Ebteqdesk is rate limiting file attachments for this account "
+            "(429). The two routes that take a file have a limit of their own, "
+            "per account and lower than the API's general one, so several "
+            "files in quick succession reach it before anything else does. "
+            "NOTHING WAS ATTACHED by this call. It is safe to make the same "
+            "call again once the limit has passed — space further files out "
+            "rather than sending them back to back."
+            + wait
+            + detail,
+            status_code=status_code,
+            path=path,
+            server_message=server_message,
+            retry_after=retry_after,
+        )
+
     if status_code == 429:
         wait = f" Retry after {retry_after}s." if retry_after else ""
         return RateLimitedError(
@@ -939,6 +1520,43 @@ def api_error_for(
             status_code=status_code,
             path=path,
             server_message=server_message,
+            retry_after=retry_after,
+        )
+
+    if status_code == 501 and (reason == REASON_DIRECT_UNAVAILABLE or attachment_route):
+        return DirectUploadUnavailableError(
+            "Large videos are switched off on this Ebteqdesk. Files up to "
+            "20 MB still work. Do not retry. (501 — this is how the desk says "
+            "the feature is off, not a fault: nothing is broken and there is "
+            "nothing in its logs to find.) NOTHING WAS SENT OR ATTACHED. A "
+            "video over 20 MB goes straight to the desk's object store, and "
+            "this deployment either has none or has that path turned off; "
+            "only an administrator can change that. Tell the user the file is "
+            "too large for this desk as it is configured — a version under "
+            "20 MB can be attached now."
+            + detail,
+            status_code=status_code,
+            path=path,
+            server_message=server_message,
+            reason=reason,
+        )
+
+    if status_code == 503 and reason == REASON_STORAGE_UNAVAILABLE:
+        wait = f" Wait at least {retry_after}s first." if retry_after else ""
+
+        return ServerError(
+            "Ebteqdesk could not reach its file store to check the uploaded "
+            "file (503), and still could not after this client waited and "
+            "asked once more. NOTHING IS ATTACHED YET and no note was written. "
+            "This is a fault on the Ebteqdesk side, not in the request or the "
+            "file. Calling the tool again with exactly the same arguments is "
+            "safe — the file is sent again and attached once, never twice."
+            + wait
+            + detail,
+            status_code=status_code,
+            path=path,
+            server_message=server_message,
+            reason=reason,
             retry_after=retry_after,
         )
 
@@ -960,6 +1578,8 @@ def api_error_for(
         required_scope=required_scope,
         required_ability=required_ability,
         field_errors=field_errors,
+        reason=reason,
+        retry_after=retry_after,
     )
 
 

@@ -2,19 +2,27 @@
 
 This is a pure REST client. It holds no database connection, imports nothing
 from the Laravel application, and knows about Ebteqdesk only through the
-thirty-two endpoint paths below — thirteen that read and nineteen that write. It
-is
+endpoint paths below. It is
 also the reference for what those endpoints return, so it PASSES PAYLOADS
 THROUGH VERBATIM — no renaming, no flattening, no derived fields. See `_request`
 for why that matters more here than it usually does.
 
-⚠️ ONE ENDPOINT READS A LOCAL FILE. `upload_kb_media` is the only method here
-that touches the caller's own filesystem — it opens the path it is given and
-sends the bytes as `multipart/form-data`. Everything else builds its request
-entirely out of its arguments, and the difference is a risk to the USER'S
-MACHINE rather than to the desk. Since 5.0.0 it reads ONLY inside the directory
-named by `EBTEQDESK_UPLOAD_ROOT`, and nothing at all while that is unset. See
-the block comment above that method.
+⚠️ TWO METHODS READ A LOCAL FILE. `upload_kb_media` and, since 5.1.0,
+`attach_file_to_ticket` are the only methods here that touch the caller's own
+filesystem — each opens the path it is given and sends the bytes. Everything
+else builds its request entirely out of its arguments, and the difference is a
+risk to the USER'S MACHINE rather than to the desk. Both read ONLY inside the
+directory named by `EBTEQDESK_UPLOAD_ROOT`, and nothing at all while that is
+unset — one folder and one pair of checks (`_upload_root`,
+`_inside_upload_root`) for both. See the block comments above those methods.
+
+🔴 ONE REQUEST DOES NOT GO TO EBTEQDESK AT ALL. A video over 20 MB is PUT
+straight to the desk's object store, at an address the desk signs for one
+upload. That request is made by a SECOND HTTP client which has no base URL, no
+default headers and no `Authorization` — the API token must never reach a third
+party — and the address itself is a credential that never appears in a return
+value, an exception or a log line. See the block comment above
+`attach_file_to_ticket`.
 
 ⚠️ ONE ENDPOINT DOES NOT RETURN JSON. `get_ticket_attachment` returns image
 BYTES, so it is the single method whose success path does not go through
@@ -34,11 +42,22 @@ tool call against a curl.
 
 from __future__ import annotations
 
-import datetime
+import asyncio
+import contextvars
+import hashlib
+import logging
+import math
+import mimetypes
+import os
 import re
+import stat
+import time
+from dataclasses import dataclass
+from datetime import date as _date, datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any, Mapping, NamedTuple, Sequence
-from urllib.parse import quote
+from typing import Any, AsyncGenerator, AsyncIterator, BinaryIO, Mapping, NamedTuple, Sequence
+from urllib.parse import quote, urlsplit
 
 import httpx2
 
@@ -46,14 +65,23 @@ from ._version import __version__
 from .config import ENV_UPLOAD_ROOT, Config
 from .errors import (
     MEDIA_UPLOAD_PATH,
+    REASON_IN_PROGRESS,
+    REASON_SIZE_MISMATCH,
+    REASON_STORAGE_UNAVAILABLE,
+    REASON_UPLOAD_INCOMPLETE,
     AbilityError,
     ApiError,
     ConfigurationError,
+    ConflictError,
+    EbteqdeskError,
+    InvalidRequestError,
     LocalFileError,
     MalformedResponseError,
     ScopeError,
+    ServerError,
     StalePortalApiError,
     TransportError,
+    UploadTransferError,
     api_error_for,
     NotFoundError,
     diagnosed_ability_error,
@@ -63,7 +91,14 @@ from .errors import (
     ticket_write_not_found,
 )
 
-__all__ = ["EbteqdeskClient", "AttachmentImage"]
+__all__ = [
+    "EbteqdeskClient",
+    "AttachmentImage",
+    "TicketAttachment",
+    "TransferProgress",
+    "MULTIPART_MAX_BYTES",
+    "PUT_DEADLINE_SECONDS",
+]
 
 #: How much of a non-JSON body to quote back. Enough to recognise an nginx 502
 #: or a Laravel error page; short enough that a 2 MB HTML page does not end up
@@ -73,6 +108,113 @@ _SNIPPET_BYTES = 200
 #: The identity endpoint. The only v1 route that needs no scope, which is what
 #: makes it usable to diagnose a scope refusal — any valid key can reach it.
 USER_PATH = "/api/v1/user"
+
+#: The two tools that read a local file, as the upload-root messages name them.
+#: One place, because every one of those messages has to say WHICH tools a
+#: missing or unusable folder costs, and a sentence that named one of the two
+#: would send a model to try the other.
+_LOCAL_FILE_TOOLS = "upload_kb_media and attach_file_to_ticket"
+_ONLY_LOCAL_FILE_TOOLS = f"Only {_LOCAL_FILE_TOOLS} are affected"
+
+# --------------------------------------------------------------------------- #
+# Ticket attachments — the numbers
+# --------------------------------------------------------------------------- #
+
+#: 🔴 THE ONE NUMBER THIS CLIENT HOLDS ABOUT WHAT A DESK ACCEPTS, and it does not
+#: decide acceptance: it decides the ROUTE. A file of up to this many bytes is
+#: sent through /api/v1 as multipart; one byte more and it is sent to the
+#: object store, which the desk allows for video only. Every other rule — the
+#: types, the 500 MB ceiling, whether large uploads are on at all — is the
+#: desk's, answered by the desk, for the reason `upload_kb_media` gives.
+MULTIPART_MAX_BYTES = 20_971_520
+
+#: How long one PUT to the object store may run. The desk signs an upload
+#: address for 60 minutes; this client stops at 50, so a body that is still
+#: going when the address expires is never the way an upload ends. About
+#: 1.4 Mbit/s sustained is what that allows for 500 MB.
+PUT_DEADLINE_SECONDS = 50 * 60
+
+#: ...or this long before the address's own `expires_at`, whichever is sooner.
+_EXPIRY_MARGIN_SECONDS = 60
+
+#: Bytes per read. The whole point of these two numbers is that neither is the
+#: size of the file: a 500 MB video is never held in memory, on either route.
+_PUT_CHUNK_BYTES = 256 * 1024
+_PART_READ_CEILING_BYTES = 64 * 1024
+
+#: The desk's `Retry-After` is 2 seconds for a request that is still running
+#: and 5 for an object store it could not reach; these are used when the header
+#: is absent. A header asking for longer than the ceiling is not obeyed —
+#: nothing here may park a transfer for minutes on one response's say-so.
+_IN_PROGRESS_WAIT_SECONDS = 2.0
+_STORAGE_WAIT_SECONDS = 5.0
+_WAIT_CEILING_SECONDS = 30.0
+
+#: How many times "still running, try again shortly" is believed before it is
+#: reported instead.
+_IN_PROGRESS_MAX_WAITS = 15
+
+#: The header the multipart route and the start route require.
+_IDEMPOTENCY_HEADER = "Idempotency-Key"
+
+#: What replaces the quoted body when the START route answers something that is
+#: not JSON. Every other malformed reply quotes its first bytes so a user can
+#: recognise a proxy page; this one reply can contain an upload address.
+_WITHHELD = "<not shown: this reply can carry an upload address>"
+
+#: The type DECLARED for a file sent to the object store, from its NAME — the
+#: start route requires one before any byte has moved. It is a label for the
+#: desk to refuse early, not a verdict: the desk reads the file's own content
+#: once it has arrived. Python's built-in table only (never the host's
+#: `/etc/mime.types` or registry, which differ by machine), plus the one video
+#: extension the desk accepts that the table lacks.
+_NAME_TYPES = mimetypes.MimeTypes()
+_NAME_TYPES.add_type("video/x-m4v", ".m4v")
+
+# --------------------------------------------------------------------------- #
+# The upload address never reaches a log
+# --------------------------------------------------------------------------- #
+#
+# 🔴 httpx2 LOGS EVERY REQUEST'S FULL URL AT INFO — `HTTP Request: PUT https://…
+# "HTTP/1.1 200 OK"` — and the MCP SDK configures logging at INFO, to STDERR,
+# when the server object is built. For a desk URL that line is harmless: the
+# token is never in a URL. For the object-store PUT the URL IS the credential,
+# so without this filter every large upload would print a working write address
+# for the next hour into whatever collects the host's stderr.
+#
+# The filter drops records made WHILE THIS TASK IS INSIDE THE PUT, and only
+# those: the marker is a context variable set around that one call, so the desk
+# client's lines — and another task's — are untouched. It is attached to the
+# HTTP stack's loggers by name because a filter on a logger does not apply to
+# records logged on its children, and it is installed at import so there is no
+# order in which a PUT can run before it.
+
+_SENDING_TO_OBJECT_STORE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "ebteqdesk_mcp_sending_to_object_store", default=False
+)
+
+_HTTP_LOGGER_NAMES = (
+    "httpx2",
+    "httpcore2",
+    "httpcore2.connection",
+    "httpcore2.http11",
+    "httpcore2.http2",
+    "httpcore2.proxy",
+    "httpcore2.socks",
+)
+
+
+class _UploadAddressLogFilter(logging.Filter):
+    """Drop an HTTP-stack log record made during the object-store PUT."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not _SENDING_TO_OBJECT_STORE.get()
+
+
+_UPLOAD_ADDRESS_LOG_FILTER = _UploadAddressLogFilter()
+
+for _name in _HTTP_LOGGER_NAMES:
+    logging.getLogger(_name).addFilter(_UPLOAD_ADDRESS_LOG_FILTER)
 
 #: The Warni Activity vocabulary, copied from App\Reporting\ActivityReport
 #: (`PERIODS`, `SORTS`), App\Reporting\ActivityTiers (`TIERS`, `MAX_SCORE`)
@@ -159,6 +301,198 @@ class AttachmentImage(NamedTuple):
     downscaled: bool | None = None
 
 
+@dataclass(frozen=True)
+class TicketAttachment:
+    """One local file, checked and ready to attach — nothing has been sent yet.
+
+    What `prepare_ticket_attachment` returns. It exists as its own step because
+    the MCP layer needs `key` BEFORE a transfer starts: the key is how a second
+    identical call finds the transfer the first one began.
+    """
+
+    ticket_id: int
+
+    #: The path as the user named it, made absolute. For messages only.
+    file_path: str
+
+    #: The name that is sent — the basename the USER gave, never the directory
+    #: and never a symlink's target.
+    name: str
+
+    #: The resolved location. Every read uses this and nothing else.
+    real_path: Path
+
+    #: From `stat`, when the file was prepared. A transfer that finds either
+    #: has moved abandons itself.
+    size: int
+    mtime_ns: int
+
+    #: The note text, or None for the desk's default. Blank is None: the desk
+    #: treats the two alike, so they must not make two keys.
+    note: str | None
+
+    #: The `Idempotency-Key`. See `_attachment_key`.
+    key: str
+
+    @property
+    def direct(self) -> bool:
+        """True when the file is too large for the API and goes to the object
+        store. Decided by size alone."""
+        return self.size > MULTIPART_MAX_BYTES
+
+
+class TransferProgress:
+    """How far one transfer has got. Written by the transfer, read by whoever
+    reports on it — the MCP tool, while the transfer runs on without it.
+
+    `snapshot()` is the `transfer` object a tool call returns when the file has
+    not finished: the one shape in this package that Ebteqdesk did not send.
+    """
+
+    UPLOADING = "uploading"
+    COMPLETING = "completing"
+
+    def __init__(self, bytes_total: int, *, clock: Any = time.monotonic) -> None:
+        self.state = self.UPLOADING
+        self.bytes_sent = 0
+        self.bytes_total = bytes_total
+        #: Seconds the current send is allowed, from when it began. None on the
+        #: multipart route, which has no upload address to outlive.
+        self.deadline_seconds: float | None = None
+
+        self._clock = clock
+        self._started_at = clock()
+        self._sending_since: float | None = None
+
+    def begin_sending(self, allowance: float | None) -> None:
+        """A send is starting, from byte zero — the first, or a fresh attempt."""
+        self.state = self.UPLOADING
+        self.bytes_sent = 0
+        self.deadline_seconds = allowance
+        self._sending_since = self._clock()
+
+    def sent(self, count: int) -> None:
+        self.bytes_sent += count
+
+    def begin_completing(self) -> None:
+        """Every byte is at the object store; the desk is being asked to attach."""
+        self.state = self.COMPLETING
+        self.bytes_sent = self.bytes_total
+
+    def snapshot(self) -> dict[str, Any]:
+        now = self._clock()
+
+        eta: int | None = None
+        if self.state == self.COMPLETING:
+            eta = 0
+        elif self._sending_since is not None and self.bytes_sent > 0:
+            sending_for = now - self._sending_since
+            if sending_for > 0:
+                rate = self.bytes_sent / sending_for
+                eta = math.ceil((self.bytes_total - self.bytes_sent) / rate)
+
+        return {
+            "state": self.state,
+            "bytes_sent": self.bytes_sent,
+            "bytes_total": self.bytes_total,
+            "elapsed_seconds": int(now - self._started_at),
+            # None until the first byte has gone: there is no rate to divide by,
+            # and a guess here would be read out to a user as a promise.
+            "eta_seconds": eta,
+            "deadline_seconds": (
+                None if self.deadline_seconds is None else int(self.deadline_seconds)
+            ),
+        }
+
+
+class _SignedUpload:
+    """The desk's answer to "start an upload", with the address kept out of sight.
+
+    🔴 THE ADDRESS IS A WRITE CREDENTIAL UNTIL IT EXPIRES, so this object exists
+    to make leaking it take deliberate effort. It has no `__dict__` and its
+    `repr` shows no address, which matters because a traceback formatter that
+    captures local variables prints the `repr` of every local in every frame —
+    and a start response held as a plain dict would print the address in full.
+    The raw string is handed out by `address()` and by nothing else, to the one
+    function that puts it on the wire.
+    """
+
+    __slots__ = ("upload_id", "completed", "received_at", "expires_in", "_address", "_headers")
+
+    def __init__(
+        self,
+        upload_id: str,
+        *,
+        completed: bool,
+        received_at: float,
+        address: str | None = None,
+        headers: Mapping[str, str] | None = None,
+        expires_in: float | None = None,
+    ) -> None:
+        self.upload_id = upload_id
+        #: True when the desk says this upload was already attached: there is
+        #: nothing to send, only a receipt to fetch.
+        self.completed = completed
+        #: This client's monotonic clock when the answer arrived.
+        self.received_at = received_at
+        #: Seconds, from `received_at`, until one minute before the address
+        #: expires — measured on the DESK's clock. None if it did not say.
+        self.expires_in = expires_in
+        self._address = address
+        self._headers = dict(headers or {})
+
+    def __repr__(self) -> str:
+        state = "completed" if self.completed else "pending"
+        return f"<_SignedUpload {self.upload_id!r} {state}, address not shown>"
+
+    def address(self) -> str:
+        """The upload address. Call it inline, in the argument that sends it;
+        never bind the result to a name."""
+        assert self._address is not None
+        return self._address
+
+    def put_headers(self, size: int) -> dict[str, str]:
+        """Exactly the headers the desk listed, plus `Content-Length`."""
+        headers = {
+            name: value
+            for name, value in self._headers.items()
+            if name.lower() != "content-length"
+        }
+        headers["Content-Length"] = str(size)
+
+        return headers
+
+
+class _PutOutcome(NamedTuple):
+    """How one PUT ended. A value, because `_put_file` must not raise — see it."""
+
+    ok: bool = False
+    #: An `UploadTransferError` kind when the send was stopped on purpose or
+    #: never begun: the deadline, the file changing. No fresh attempt follows.
+    abandoned: str | None = None
+    #: What the object store answered, if it answered.
+    status_code: int | None = None
+    #: The TYPE of the exception that ended it, never its message.
+    cause_type: str | None = None
+
+
+class _Abandon(Exception):
+    """A reader stopping a send from inside it. Carries nothing and never
+    leaves this module."""
+
+
+class _StartAgain(Exception):
+    """The desk's answer to "attach it" means the file has to be sent again.
+
+    Carries the error to raise if that has already been tried once. Never
+    leaves this module.
+    """
+
+    def __init__(self, final: EbteqdeskError) -> None:
+        super().__init__()
+        self.final = final
+
+
 class EbteqdeskClient:
     """An async client for the Ebteqdesk v1 REST API.
 
@@ -176,8 +510,23 @@ class EbteqdeskClient:
         config: Config,
         *,
         transport: httpx2.AsyncBaseTransport | None = None,
+        upload_transport: httpx2.AsyncBaseTransport | None = None,
     ) -> None:
         self._config = config
+
+        # The object-store client is built on first use — see `_upload_client`
+        # — so a process that never sends a large file never builds a second
+        # connection pool. `upload_transport` is its test seam, kept
+        # SEPARATE from `transport` on purpose: a test that hands both clients
+        # one fake can see which of them a request actually left through.
+        self._upload_transport = upload_transport
+        self._upload_http: httpx2.AsyncClient | None = None
+
+        # The two things a transfer waits on, held here so a test can replace
+        # them and prove the 50-minute deadline and the `Retry-After` pauses
+        # without spending 50 minutes or any seconds at all.
+        self._monotonic = time.monotonic
+        self._sleep = asyncio.sleep
 
         # `transport` exists for the test suite, which drives the whole client
         # through httpx2.MockTransport. That is deliberately the ONLY seam: the
@@ -226,6 +575,10 @@ class EbteqdeskClient:
 
     async def aclose(self) -> None:
         await self._http.aclose()
+
+        if self._upload_http is not None:
+            await self._upload_http.aclose()
+            self._upload_http = None
 
     # ------------------------------------------------------------------ #
     # The thirteen READ endpoints
@@ -1999,12 +2352,13 @@ class EbteqdeskClient:
         )
 
     # ------------------------------------------------------------------
-    # MEDIA — the one endpoint that reads a LOCAL FILE
+    # MEDIA — the first of the two endpoints that read a LOCAL FILE
     # ------------------------------------------------------------------
     #
-    # 🔴 EVERY OTHER METHOD ON THIS CLASS BUILDS ITS REQUEST OUT OF ARGUMENTS.
-    # This one opens a path on the machine the MCP server is running on and puts
-    # the bytes on the wire. That is a category of risk the rest of this module
+    # 🔴 EVERY METHOD ON THIS CLASS BUT TWO BUILDS ITS REQUEST OUT OF ARGUMENTS.
+    # This one — and `attach_file_to_ticket`, further down, which shares its
+    # upload root — opens a path on the machine the MCP server is running on and
+    # puts the bytes on the wire. That is a category of risk the rest of this module
     # does not carry — it is a risk to the CALLER'S MACHINE rather than to the
     # desk — and it is why `upload_kb_media`'s tool description says, in as many
     # words, that it must upload only files the user named.
@@ -2095,6 +2449,618 @@ class EbteqdeskClient:
             # something it did not check.
             files={"file": (name, content, "application/octet-stream")},
         )
+
+    # ------------------------------------------------------------------
+    # TICKET ATTACHMENTS — the second method that reads a LOCAL FILE
+    # ------------------------------------------------------------------
+    #
+    # 🔴 EVERYTHING THE MEDIA BLOCK ABOVE SAYS ABOUT A LOCAL PATH APPLIES HERE,
+    # THROUGH THE SAME TWO FUNCTIONS. `attach_file_to_ticket` reads only inside
+    # `EBTEQDESK_UPLOAD_ROOT`, nothing while that is unset, and a path is
+    # resolved and checked for containment before the file is so much as
+    # `stat`ed — `_resolved_local_path` is one call shared with
+    # `upload_kb_media`, not a copy of it. It matters MORE here: the knowledge
+    # base accepts six media types, and a ticket accepts PDF, Office, CSV, TXT
+    # and ZIP as well, which is most of what is worth stealing from a disk.
+    #
+    # THE FILE LANDS ON A NEW PRIVATE NOTE. Three routes, all under
+    # `/api/v1/tickets/{id}/notes/` and all authorised exactly as
+    # `add_private_note` is: nothing is mailed to the requester, the requester
+    # portal does not list the file, and the note records who attached it. One
+    # call is one file on one note.
+    #
+    # TWO TRANSPORTS, CHOSEN BY SIZE ALONE (`MULTIPART_MAX_BYTES`):
+    #
+    #   up to 20 MB   POST …/notes/attachments, multipart, one request.
+    #   over 20 MB    POST …/notes/uploads to START — the desk answers with an
+    #                 address on its object store, signed for this one upload —
+    #                 then a PUT of the file TO THAT ADDRESS, then
+    #                 POST …/notes/uploads/{upload_id}/complete, which verifies
+    #                 the object and writes the note. Video only; the desk
+    #                 refuses anything else at START, before a byte has moved.
+    #
+    # 🔴 THE FILE IS NEVER HELD IN MEMORY, ON EITHER ROUTE. `_local_upload`
+    # reads its whole file and says so, which is right for a 10 MB screenshot
+    # and would be 500 MB of RAM here. Both routes read from an open handle in
+    # bounded chunks (`_FilePart`, `_file_chunks`) with the length declared up
+    # front. Nothing is base64'd and nothing is hashed: the idempotency key is
+    # made from `stat`, not from a pass over the bytes.
+    #
+    # 🔴 THE PUT GOES THROUGH ITS OWN HTTP CLIENT (`_upload_client`). `_http` is
+    # built with the desk's base URL and `Authorization: Bearer <token>` on
+    # every request. Sent to an object store, that header hands the API token to
+    # a third party AND breaks the signed request. The second client has no
+    # base URL, no default headers, no cookies and follows no redirect.
+    #
+    # 🔴 THE UPLOAD ADDRESS IS A CREDENTIAL. Whoever holds it can write that
+    # object until it expires. So: the start response is never returned to a
+    # caller (`_SignedUpload` keeps the address out of `repr`); `_put_file`
+    # lets no exception out of the frame that holds it, and describes a failure
+    # by the exception's TYPE and the status code, never `str(exc)`; a
+    # malformed start response is reported without quoting its body; and the
+    # HTTP stack's own request log is silenced for that one call (see
+    # `_UploadAddressLogFilter`). The address must be `https://` — the file
+    # gets the care the token gets.
+    #
+    # RETRIES HAVE A KEY, WHICH IS WHY THIS WRITE MAY BE REPEATED. Every other
+    # write here says "never retry": a POST that timed out may have landed. The
+    # two routes that take the file require an `Idempotency-Key`, and this
+    # client derives it from the ticket, the resolved path, the size, the
+    # modification time and the note — so the same call is the same key, the
+    # desk files it once, and a changed file is a different key. What is NOT
+    # retried is decided per answer: see `_send_direct` for the one fresh
+    # attempt a large upload gets.
+    #
+    # ONE METHOD FOR A LIBRARY CALLER, TWO FOR THE MCP LAYER.
+    # `attach_file_to_ticket` runs a transfer to its end. `server.py` instead
+    # calls `prepare_ticket_attachment` (no I/O beyond `stat`, and the key) and
+    # then runs `send_ticket_attachment` as a task it does not wait on for more
+    # than 30 seconds — a tool call must not depend on staying open for the
+    # length of a 500 MB upload.
+
+    def prepare_ticket_attachment(
+        self, ticket_id: int, file_path: str, *, note: str | None = None
+    ) -> TicketAttachment:
+        """Check one local file and derive its key. NOTHING IS SENT OR OPENED.
+
+        The upload root and the containment check run first (`ConfigurationError`
+        while the folder is unset or unusable, `LocalFileError` for a path that
+        resolves outside it — identically whether or not it exists). Then the
+        resolved path is `stat`ed, without being read: a missing path, a
+        directory, a device or a pipe, an empty file and an unreadable one are
+        each a `LocalFileError` naming the reason.
+
+        `note` is the note's text; None or blank means the desk writes its
+        default, `Attached file: <name>`.
+        """
+        ticket = _ticket_id(ticket_id)
+
+        if note is not None and not isinstance(note, str):
+            raise ValueError(
+                f"note must be text, or omitted for the desk's default, not {note!r}."
+            )
+
+        # Blank is absent, here rather than on the desk: the desk treats the
+        # two alike, and the key below must not come out different for them.
+        text = note if note is not None and note.strip() else None
+
+        path, real = _resolved_local_path(file_path, self._config.upload_root)
+        info = _regular_file(path, real)
+
+        return TicketAttachment(
+            ticket_id=ticket,
+            file_path=str(path),
+            # The name the USER gave, not the symlink target's — as on
+            # `upload_kb_media`, and for the same two reasons.
+            name=path.name,
+            real_path=real,
+            size=info.st_size,
+            mtime_ns=info.st_mtime_ns,
+            note=text,
+            key=_attachment_key(ticket, real, info.st_size, info.st_mtime_ns, text),
+        )
+
+    async def send_ticket_attachment(
+        self,
+        attachment: TicketAttachment,
+        *,
+        progress: TransferProgress | None = None,
+    ) -> dict[str, Any]:
+        """Send a prepared file and return the desk's receipt, verbatim.
+
+        201, or 200 when the desk had already filed this exact upload::
+
+            {"data": <ticket>, "comment": {"id", "created_at"},
+             "attachment": {"id", "name", "mime_type", "size", "url"},
+             "replayed": false}
+
+        `data` and `comment` are `add_private_note`'s receipt; `comment.id` is
+        never null here, because the desk always supplies a body. `replayed` is
+        in the BODY on purpose — this client never turns a status code into a
+        derived key (see `_exchange`), so the desk says it in the payload.
+        `attachment.url` serves images only.
+
+        `progress`, if given, is updated as the bytes go; it is how a caller
+        that is not waiting on this coroutine reports on it.
+
+        Raises what `add_private_note` raises for the same ticket — scope,
+        ability and 404 are that endpoint's, through the same narrowers — plus
+        `PayloadTooLargeError`, `UnsupportedMediaError`, `ConflictError`,
+        `DirectUploadUnavailableError`, `StaleAttachmentApiError` and
+        `UploadTransferError`. Each says whether calling again can help.
+        """
+        if progress is None:
+            progress = TransferProgress(attachment.size, clock=self._monotonic)
+
+        # Time has passed since the file was prepared — none at all through
+        # `attach_file_to_ticket`, but a detached transfer starts when the event
+        # loop gets to it. A file that has already changed is refused before the
+        # first request rather than after an upload has been started for it.
+        if not _unchanged(attachment):
+            raise UploadTransferError(
+                UploadTransferError.FILE_CHANGED, attachment.name, bytes_total=attachment.size
+            )
+
+        if attachment.direct:
+            return await self._send_direct(attachment, progress)
+
+        return await self._send_multipart(attachment, progress)
+
+    async def attach_file_to_ticket(
+        self, ticket_id: int, file_path: str, *, note: str | None = None
+    ) -> dict[str, Any]:
+        """Attach one LOCAL file to a ticket, on a new INTERNAL note.
+
+        `prepare_ticket_attachment` then `send_ticket_attachment`, awaited to
+        the end — for a 500 MB video on a slow line that is most of an hour.
+        See the block comment above for everything this does and does not do.
+
+        ✅ SAFE TO REPEAT WITH THE SAME ARGUMENTS, unlike `upload_kb_media`: the
+        same file, ticket and note is filed once, and a repeat answers with
+        `"replayed": true`.
+
+        Requires what `add_private_note` requires: `ticket:write` and
+        `ticket.reply` on the caller's own ticket; `escalation:read`,
+        `escalation:write` and `bp_escalation.reply` on an escalated one.
+        """
+        return await self.send_ticket_attachment(
+            self.prepare_ticket_attachment(ticket_id, file_path, note=note)
+        )
+
+    async def _send_multipart(
+        self, attachment: TicketAttachment, progress: TransferProgress
+    ) -> dict[str, Any]:
+        """POST …/notes/attachments — one file up to 20 MB, in one request."""
+        path = f"/api/v1/tickets/{attachment.ticket_id}/notes/attachments"
+        waits = 0
+
+        while True:
+            changed = False
+            wait: str | None = None
+
+            try:
+                with _open_unchanged(attachment) as handle:
+                    progress.begin_sending(None)
+
+                    payload, _ = await self._attachment_exchange(
+                        path,
+                        # 🔴 `file`, and a deliberately neutral part type: the
+                        # desk sniffs the bytes and never reads this, exactly as
+                        # on the KB upload. The second element is a READER, not
+                        # bytes — httpx2 takes its length from the handle and
+                        # pulls it in chunks.
+                        files={
+                            "file": (
+                                attachment.name,
+                                _FilePart(handle, attachment, progress),
+                                "application/octet-stream",
+                            )
+                        },
+                        # Omitted, not sent empty, when there is no note.
+                        data=None if attachment.note is None else {"note": attachment.note},
+                        headers={_IDEMPOTENCY_HEADER: attachment.key},
+                    )
+
+                    return payload
+            except _Abandon:
+                changed = True
+            except ConflictError as exc:
+                # "The same request is still running": an earlier attempt of
+                # this very call. Wait as long as the desk asks and send it
+                # again — the key makes the second one a replay, not a copy.
+                if exc.reason != REASON_IN_PROGRESS or waits >= _IN_PROGRESS_MAX_WAITS:
+                    raise
+
+                wait = exc.retry_after
+
+            if changed:
+                raise UploadTransferError(
+                    UploadTransferError.FILE_CHANGED,
+                    attachment.name,
+                    bytes_sent=progress.bytes_sent,
+                    bytes_total=attachment.size,
+                )
+
+            waits += 1
+            await self._pause(wait, _IN_PROGRESS_WAIT_SECONDS)
+
+    async def _send_direct(
+        self, attachment: TicketAttachment, progress: TransferProgress
+    ) -> dict[str, Any]:
+        """Start, PUT, complete — a video over 20 MB, by way of the object store.
+
+        🔴 ONE FRESH ATTEMPT, AND ONLY ONE, WHATEVER WENT WRONG. Four answers
+        mean "the file has to be sent again": the PUT itself failing, and the
+        desk answering the completion with a 404 (the upload expired), with
+        `upload_incomplete` (no object arrived) or with `upload_size_mismatch`
+        (the wrong number of bytes arrived, and the desk deleted them). Each is
+        answered the same way — START AGAIN, which with the same key returns
+        the same upload and a freshly signed address — and the second such
+        answer of any kind is final. The budget is shared on purpose: a 500 MB
+        upload that could be restarted once per cause could be sent five times.
+
+        What is NOT a fresh attempt: waiting out `idempotency_in_progress`, and
+        the one repeat of a completion the desk's object store was unreachable
+        for. Those re-ask a question; they do not resend a file.
+
+        What is never retried: the deadline, a file that changed under the
+        read, and an address that is not https. See `_put_file`.
+        """
+        restarted = False
+
+        while True:
+            upload = await self._start_upload(attachment)
+
+            if not upload.completed:
+                outcome = await self._put_file(upload, attachment, progress)
+
+                if outcome.abandoned is not None:
+                    raise UploadTransferError(
+                        outcome.abandoned,
+                        attachment.name,
+                        bytes_sent=progress.bytes_sent,
+                        bytes_total=attachment.size,
+                    )
+
+                if not outcome.ok:
+                    if restarted:
+                        raise UploadTransferError(
+                            UploadTransferError.PUT_FAILED,
+                            attachment.name,
+                            cause_type=outcome.cause_type,
+                            status_code=outcome.status_code,
+                            bytes_sent=progress.bytes_sent,
+                            bytes_total=attachment.size,
+                        )
+
+                    restarted = True
+                    continue
+
+            # Already attached, or just sent: either way the receipt comes from
+            # the completion route, which answers an upload it has already
+            # completed with the same body and `"replayed": true`.
+            progress.begin_completing()
+
+            try:
+                return await self._complete_upload(attachment, upload.upload_id)
+            except _StartAgain as again:
+                final = again.final
+
+            if restarted:
+                raise final
+
+            restarted = True
+
+    async def _start_upload(self, attachment: TicketAttachment) -> _SignedUpload:
+        """POST …/notes/uploads — start, or resume, one upload.
+
+        201 for a new upload; 200 for the same key again, with the SAME
+        `upload_id` and a freshly signed address while it is pending, or a
+        `completed` body once it has been attached. No note is written by this
+        call: the note exists only once the file does.
+        """
+        path = f"/api/v1/tickets/{attachment.ticket_id}/notes/uploads"
+
+        body: dict[str, Any] = {
+            "filename": attachment.name,
+            "mime_type": _declared_type(attachment.name),
+            "size": attachment.size,
+        }
+        if attachment.note is not None:
+            body["note"] = attachment.note
+
+        waits = 0
+
+        while True:
+            wait: str | None = None
+
+            try:
+                # 🔴 The response is unpacked straight into the parser and never
+                # bound to a name in this frame: it holds the upload address.
+                upload = _signed_upload(
+                    *await self._attachment_exchange(
+                        path,
+                        json=body,
+                        headers={_IDEMPOTENCY_HEADER: attachment.key},
+                        withhold_body=True,
+                    ),
+                    self._monotonic(),
+                )
+                break
+            except ConflictError as exc:
+                # The key's upload is being removed by the desk's prune.
+                if exc.reason != REASON_IN_PROGRESS or waits >= _IN_PROGRESS_MAX_WAITS:
+                    raise
+
+                wait = exc.retry_after
+
+            waits += 1
+            await self._pause(wait, _IN_PROGRESS_WAIT_SECONDS)
+
+        if isinstance(upload, str):
+            raise UploadTransferError(upload, attachment.name, bytes_total=attachment.size)
+
+        return upload
+
+    async def _put_file(
+        self,
+        upload: _SignedUpload,
+        attachment: TicketAttachment,
+        progress: TransferProgress,
+    ) -> _PutOutcome:
+        """PUT the file to the address the desk signed.
+
+        🔴 RETURNS AN OUTCOME AND RAISES NOTHING, and that is the control rather
+        than a style. An exception leaving here would carry a traceback through
+        the frame that built the request, and an HTTP library's request object
+        prints its URL in its `repr` — so anything that formats a traceback
+        with local variables would print a working write address. Everything
+        that can go wrong is caught inside `_put_once`, reduced to the TYPE of
+        the exception and the status code, and dropped there.
+
+        Three ways it ends without a fresh attempt being worth anything:
+
+          - THE DEADLINE. 50 minutes from when this PUT began, or one minute
+            before the address expires, whichever is sooner. The lifetime is
+            measured on the desk's clock (`_signed_upload`), so a laptop whose
+            clock is wrong neither cuts an upload short nor runs past the end.
+          - THE FILE CHANGED. Its size and modification time are checked before
+            every chunk and once more after the store has answered. A changed
+            file is not the file that was named, so the desk is never asked to
+            attach it — the object is left for the desk's prune.
+          - Neither is retried: the first would meet the same limit, the second
+            is a different file.
+        """
+        began = self._monotonic()
+
+        deadline_at = began + PUT_DEADLINE_SECONDS
+        if upload.expires_in is not None:
+            deadline_at = min(deadline_at, upload.received_at + upload.expires_in)
+
+        progress.begin_sending(deadline_at - began)
+
+        if deadline_at <= began:
+            return _PutOutcome(abandoned=UploadTransferError.DEADLINE)
+
+        try:
+            handle = _open_unchanged(attachment)
+        except UploadTransferError as exc:
+            return _PutOutcome(abandoned=exc.kind)
+
+        stopped: list[str] = []
+        chunks = _file_chunks(
+            handle, attachment, progress, deadline_at, self._monotonic, stopped
+        )
+
+        try:
+            status_code, cause_type = await self._put_once(upload, attachment.size, chunks)
+        finally:
+            # Closed here rather than left to the garbage collector: a send that
+            # failed half-way leaves the generator suspended on its `yield`.
+            await chunks.aclose()
+            handle.close()
+
+        if stopped:
+            return _PutOutcome(abandoned=stopped[0])
+
+        if status_code != 200:
+            return _PutOutcome(status_code=status_code, cause_type=cause_type)
+
+        if not _unchanged(attachment):
+            return _PutOutcome(abandoned=UploadTransferError.FILE_CHANGED)
+
+        return _PutOutcome(ok=True)
+
+    async def _put_once(
+        self, upload: _SignedUpload, size: int, body: AsyncIterator[bytes]
+    ) -> tuple[int | None, str | None]:
+        """One PUT: (the store's status, or the failing exception's TYPE).
+
+        The only frame in this package that holds the upload address in a form
+        that prints it. So it is written to let nothing out: every `Exception`
+        is caught here and reduced to its class name, the response body is never
+        read (an object store's error XML quotes the request it refused), and
+        the HTTP stack's request log is dropped while the marker below is set.
+
+        The store answers 200 with an empty body. Anything else — another
+        status, a redirect, a dropped connection — is "not accepted".
+        """
+        client = self._upload_client()
+        marker = _SENDING_TO_OBJECT_STORE.set(True)
+
+        try:
+            response = await client.send(
+                client.build_request(
+                    "PUT",
+                    upload.address(),
+                    # Exactly what the desk listed, plus the length. An explicit
+                    # `Content-Length` is also what stops httpx2 falling back to
+                    # chunked transfer encoding for a streamed body, which a
+                    # signed PUT does not accept.
+                    headers=upload.put_headers(size),
+                    content=body,
+                ),
+                stream=True,
+            )
+
+            status_code = response.status_code
+
+            try:
+                await response.aclose()
+            except Exception:
+                # The store has already answered; failing to close the stream
+                # tidily must not turn an accepted upload into a failed one.
+                pass
+
+            return status_code, None
+        except Exception as exc:
+            return None, type(exc).__name__
+        finally:
+            _SENDING_TO_OBJECT_STORE.reset(marker)
+
+    def _upload_client(self) -> httpx2.AsyncClient:
+        """The HTTP client for the object-store PUT, built on first use.
+
+        🔴 NOT `self._http`, AND IT MUST NEVER BECOME IT. That client carries
+        `Authorization: Bearer <token>` on every request it sends; the object
+        store is a third party, and a signed PUT that also carries an
+        `Authorization` header is refused as two authentications at once. This
+        one has no base URL, and its default headers — `Accept`,
+        `Accept-Encoding`, `Connection`, `User-Agent` — are CLEARED, so what
+        goes out is `Host`, `Content-Length` and whatever the desk listed, and
+        nothing else. It follows no redirect: an address that answers 3xx is an
+        upload that was not accepted, not an invitation to send the file
+        somewhere the desk did not sign.
+        """
+        if self._upload_http is None:
+            client = httpx2.AsyncClient(
+                timeout=httpx2.Timeout(self._config.timeout),
+                transport=self._upload_transport,
+                follow_redirects=False,
+            )
+            client.headers.clear()
+
+            self._upload_http = client
+
+        return self._upload_http
+
+    async def _complete_upload(
+        self, attachment: TicketAttachment, upload_id: str
+    ) -> dict[str, Any]:
+        """POST …/notes/uploads/{upload_id}/complete — verify and attach.
+
+        No body and no `Idempotency-Key`: the `upload_id` is the identity. This
+        is the call that writes the note, so the desk authorises it again, as
+        the caller is NOW.
+
+        Returns the receipt, or raises `_StartAgain` for the three answers that
+        mean the file has to be sent again (see `_send_direct`). A completion
+        that is still running is waited out; an unreachable object store is
+        asked once more after the pause the desk names.
+        """
+        path = (
+            f"/api/v1/tickets/{attachment.ticket_id}/notes/uploads/"
+            # Opaque, and sent back verbatim — which for the 26 characters the
+            # desk issues is what quoting does. Quoted so that it can only ever
+            # be ONE path segment.
+            f"{quote(upload_id, safe='')}/complete"
+        )
+
+        waits = 0
+        asked_store_again = False
+
+        while True:
+            try:
+                payload, _ = await self._attachment_exchange(path)
+
+                return payload
+            except NotFoundError:
+                # One body for an upload that is unknown, expired, somebody
+                # else's or on another ticket. The ticket itself was reachable a
+                # moment ago, when the upload was started; if that has changed,
+                # starting again says so with the ticket's own 404.
+                raise _StartAgain(
+                    UploadTransferError(
+                        UploadTransferError.EXPIRED,
+                        attachment.name,
+                        bytes_sent=attachment.size,
+                        bytes_total=attachment.size,
+                    )
+                ) from None
+            except ConflictError as exc:
+                if exc.reason == REASON_UPLOAD_INCOMPLETE:
+                    raise _StartAgain(
+                        UploadTransferError(
+                            UploadTransferError.INCOMPLETE,
+                            attachment.name,
+                            bytes_sent=attachment.size,
+                            bytes_total=attachment.size,
+                        )
+                    ) from None
+
+                if exc.reason != REASON_IN_PROGRESS or waits >= _IN_PROGRESS_MAX_WAITS:
+                    raise
+
+                waits += 1
+                wait, fallback = exc.retry_after, _IN_PROGRESS_WAIT_SECONDS
+            except InvalidRequestError as exc:
+                if exc.reason != REASON_SIZE_MISMATCH:
+                    raise
+
+                raise _StartAgain(exc) from None
+            except ServerError as exc:
+                if exc.reason != REASON_STORAGE_UNAVAILABLE or asked_store_again:
+                    raise
+
+                asked_store_again = True
+                wait, fallback = exc.retry_after, _STORAGE_WAIT_SECONDS
+
+            await self._pause(wait, fallback)
+
+    async def _attachment_exchange(
+        self, path: str, *, withhold_body: bool = False, **request: Any
+    ) -> tuple[dict[str, Any], httpx2.Headers]:
+        """One POST to a ticket-attachment route, through `_exchange`.
+
+        Two things all three routes share and no other endpoint needs:
+
+          - `escalated_note_error`, as on `add_private_note`: these routes file
+            a note, so a refusal naming `escalation:write` means the ticket is
+            escalated, and for the same reason.
+          - `withhold_body`, for the START route only: a reply that is not the
+            JSON it should be is reported WITHOUT its first bytes, because that
+            one reply can contain an upload address.
+
+        ⚠️ A 404 THAT IS NOT JSON IS LEFT AS WHAT IT IS — a proxy or an error
+        page answering instead of the application. A desk that simply lacks
+        these routes answers JSON, with no `error` key, and `api_error_for`
+        recognises that; an HTML 404 is somebody else, and saying "this desk
+        predates the feature" about it would be a guess.
+        """
+        try:
+            return await self._exchange(
+                "POST", path, on_scope_error=escalated_note_error, **request
+            )
+        except MalformedResponseError as exc:
+            if not withhold_body:
+                raise
+
+            # 🔴 Two plain values are taken out and the exception is let go at
+            # the end of this block. Its MESSAGE quotes the reply's first bytes,
+            # so re-raising it, chaining it, or even keeping it in a local name
+            # would carry those bytes along with whatever is raised next.
+            status_code, content_type = exc.status_code, exc.content_type
+
+        raise MalformedResponseError(
+            status_code=status_code,
+            path=path,
+            content_type=content_type,
+            body_snippet=_WITHHELD,
+        )
+
+    async def _pause(self, retry_after: str | None, fallback: float) -> None:
+        """Wait as long as the desk asked, within reason. See the constants."""
+        await self._sleep(_wait_seconds(retry_after, fallback))
 
     # ------------------------------------------------------------------
     # REORDER — three endpoints, one rule
@@ -2886,10 +3852,46 @@ class EbteqdeskClient:
         params: Mapping[str, Any] | None = None,
         json: Mapping[str, Any] | None = None,
         files: Mapping[str, Any] | None = None,
+        data: Mapping[str, Any] | None = None,
+        headers: Mapping[str, str] | None = None,
         diagnose_scope: bool = True,
         on_scope_error: Any = None,
     ) -> dict[str, Any]:
+        """One request, its decoded body. See `_exchange`, which is this method
+        plus the response headers and is where the work is done."""
+        payload, _ = await self._exchange(
+            method,
+            path,
+            params=params,
+            json=json,
+            files=files,
+            data=data,
+            headers=headers,
+            diagnose_scope=diagnose_scope,
+            on_scope_error=on_scope_error,
+        )
+
+        return payload
+
+    async def _exchange(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        json: Mapping[str, Any] | None = None,
+        files: Mapping[str, Any] | None = None,
+        data: Mapping[str, Any] | None = None,
+        headers: Mapping[str, str] | None = None,
+        diagnose_scope: bool = True,
+        on_scope_error: Any = None,
+    ) -> tuple[dict[str, Any], httpx2.Headers]:
         """One request, one place where every failure mode is classified.
+
+        Returns the decoded body AND the response headers. Every caller but one
+        wants only the first and goes through `_request`; the start of a large
+        upload also needs the desk's own `Date`, to measure an upload address's
+        lifetime on the clock that signed it rather than on this machine's.
 
         Reads and writes share this method rather than having a `_get` and a
         `_post` that each classify their own failures. The classification is the
@@ -2928,15 +3930,21 @@ class EbteqdeskClient:
         object for them would be this client asserting a request shape the API
         never described.
 
-        `files` is the multipart form, and exactly one endpoint uses it —
-        `upload_kb_media`. It travels through this method rather than a private
-        `_post_file` for the reason this docstring opens with: the
-        classification is the valuable part, it is identical for a multipart
-        request, and a second copy would be the write half quietly missing the
-        next thing added to the JSON half. 🔴 `json` and `files` are mutually
-        exclusive on the wire — httpx would encode the JSON body and drop the
-        parts — so passing both is refused here rather than silently losing the
-        upload.
+        `files` is the multipart form, and two endpoints use it —
+        `upload_kb_media` and the ticket-attachment route. It travels through
+        this method rather than a private `_post_file` for the reason this
+        docstring opens with: the classification is the valuable part, it is
+        identical for a multipart request, and a second copy would be the write
+        half quietly missing the next thing added to the JSON half. 🔴 `json`
+        and `files` are mutually exclusive on the wire — httpx would encode the
+        JSON body and drop the parts — so passing both is refused here rather
+        than silently losing the upload.
+
+        `data` is the plain form fields that travel beside `files` in the same
+        multipart body (the attachment's optional `note`), and `headers` is
+        added to this one request — `Idempotency-Key`, on the two routes that
+        require it. Neither can displace the client's own `Authorization` or
+        `Accept`: no caller passes those names.
         """
         if json is not None and files is not None:
             raise ValueError(
@@ -2951,6 +3959,8 @@ class EbteqdeskClient:
                 params=dict(params or {}),
                 json=None if json is None else dict(json),
                 files=None if files is None else dict(files),
+                data=None if data is None else dict(data),
+                headers=None if headers is None else dict(headers),
             )
         except httpx2.HTTPError as exc:
             raise TransportError(
@@ -2980,7 +3990,7 @@ class EbteqdeskClient:
         # staged 202 carries a top-level `revision` key and an applied 200 never
         # does — so the caller branches on the payload, the same bytes a curl
         # would show. See update_kb_article.
-        return payload
+        return payload, response.headers
 
     async def _get_image(
         self, path: str, params: Mapping[str, Any] | None = None
@@ -3335,20 +4345,11 @@ def _local_upload(file_path: str, upload_root: str | None) -> tuple[str, bytes]:
     The whole file is read into memory. The server's caps are 10 MB for an image
     and 50 MB for a video, and streaming a body this size would buy nothing
     while making the retry hazard in `upload_kb_media` harder to reason about.
+    🔴 That is true of THIS endpoint and no other: `attach_file_to_ticket` may be
+    handed 500 MB, shares the path resolution above with this function, and
+    must never call it for the bytes.
     """
-    if not isinstance(file_path, str) or not file_path.strip():
-        raise LocalFileError(str(file_path), "no path was given")
-
-    root = _upload_root(upload_root)
-
-    path = Path(file_path).expanduser()
-    if not path.is_absolute():
-        # Relative to the upload directory, NOT to this process's working
-        # directory — which, for a server a host launched, is wherever the host
-        # happened to be, and nothing a user could predict.
-        path = root / path
-
-    real = _inside_upload_root(path, root)
+    path, real = _resolved_local_path(file_path, upload_root)
 
     if real.is_dir():
         raise LocalFileError(str(path), "that is a directory, not a file")
@@ -3375,6 +4376,404 @@ def _local_upload(file_path: str, upload_root: str | None) -> tuple[str, bytes]:
     return path.name, content
 
 
+def _regular_file(path: Path, real: Path) -> os.stat_result:
+    """`stat` the resolved path and require a regular, non-empty, readable file.
+
+    The second half of a local read for `attach_file_to_ticket`, and the half
+    that differs from `_local_upload`: NOTHING IS OPENED AND NOTHING IS READ.
+    The size and the modification time that come back are what the idempotency
+    key is made from and what a transfer later checks the file against.
+
+    A device, a pipe or a socket is refused by name. `_local_upload` never had
+    to: it calls `read_bytes()`, which simply returns whatever such a thing
+    yields. A streamed upload of a declared length has no sensible meaning for
+    one — and `/dev/zero` inside the upload folder would be 500 MB of nothing.
+    """
+    try:
+        info = os.stat(real)
+    except FileNotFoundError:
+        raise LocalFileError(str(path), "no such file on this machine") from None
+    except OSError as exc:
+        raise LocalFileError(
+            str(path), f"it could not be read ({exc.strerror or exc})"
+        ) from None
+
+    if stat.S_ISDIR(info.st_mode):
+        raise LocalFileError(str(path), "that is a directory, not a file")
+
+    if not stat.S_ISREG(info.st_mode):
+        raise LocalFileError(
+            str(path),
+            "that is not a regular file — a device, a pipe or a socket cannot "
+            "be attached",
+        )
+
+    if info.st_size == 0:
+        # The desk refuses an empty file too, with a message about supported
+        # types. Refused here, where the reason is knowable.
+        raise LocalFileError(str(path), "the file is empty")
+
+    if not os.access(real, os.R_OK):
+        raise LocalFileError(str(path), "it could not be read (permission denied)")
+
+    return info
+
+
+def _attachment_key(
+    ticket_id: int, real: Path, size: int, mtime_ns: int, note: str | None
+) -> str:
+    """The `Idempotency-Key` for one attachment: 64 hex characters.
+
+    The SHA-256 of the ticket id, the RESOLVED path, the size, the modification
+    time in nanoseconds and the note text, joined by newlines.
+
+      - STABLE ACROSS A MODEL'S RETRIES. A model that retries after a timeout
+        makes a new tool call with nothing to carry over; the same arguments
+        are the only handle it has, and they hash to the same key however the
+        path was spelled (`~/x`, a relative path and a symlink to the file all
+        resolve to one location).
+      - DIFFERENT WHEN THE FILE IS. A file saved again has a new modification
+        time, so it is a new upload rather than a replay of the old one.
+      - FREE. Hashing the content would be a full pass over 500 MB before the
+        first byte was sent.
+
+    The path is HASHED AND NEVER SENT: it is the user's filesystem layout. The
+    desk treats the key as opaque (1–200 characters, no `:`).
+
+    ⚠️ What this cannot see: content that changed while the size and the
+    modification time did not. The desk can, on the multipart route — it binds
+    the key to the bytes — and answers `idempotency_key_reused`.
+    """
+    material = "\n".join(
+        (str(ticket_id), str(real), str(size), str(mtime_ns), note or "")
+    )
+
+    # `backslashreplace` so that a path with undecodable bytes in it (legal on
+    # POSIX, and how Python surfaces them) still hashes rather than raising.
+    return hashlib.sha256(material.encode("utf-8", "backslashreplace")).hexdigest()
+
+
+def _declared_type(name: str) -> str:
+    """The `mime_type` declared when starting a large upload, from the NAME.
+
+    See `_NAME_TYPES`. Unknown extensions are declared as what they are —
+    unknown — and the desk refuses them at start, before any bytes move.
+    """
+    extension = os.path.splitext(name)[1].lower()
+
+    return _NAME_TYPES.types_map[True].get(extension) or "application/octet-stream"
+
+
+def _unchanged(attachment: TicketAttachment) -> bool:
+    """Is the file still the one that was prepared? Size and modification time,
+    from `stat` on the resolved path — the same call that made the key, so the
+    two can never disagree about what "the same file" means. A file that has
+    gone, or been replaced by a different one under the same name, is changed.
+    """
+    try:
+        info = os.stat(attachment.real_path)
+    except OSError:
+        return False
+
+    return (
+        stat.S_ISREG(info.st_mode)
+        and info.st_size == attachment.size
+        and info.st_mtime_ns == attachment.mtime_ns
+    )
+
+
+def _open_unchanged(attachment: TicketAttachment) -> BinaryIO:
+    """Open the resolved path for reading, and confirm it is still the file.
+
+    The check comes AFTER the open, so the handle that is read is one the check
+    was made with in hand. Raises `UploadTransferError` rather than
+    `LocalFileError`: by the time a transfer opens the file a request may
+    already have gone, and "nothing was sent" would no longer be true.
+    """
+    try:
+        handle = open(attachment.real_path, "rb")
+    except OSError:
+        handle = None
+
+    if handle is not None and _unchanged(attachment):
+        return handle
+
+    if handle is not None:
+        handle.close()
+
+    raise UploadTransferError(
+        UploadTransferError.FILE_CHANGED, attachment.name, bytes_total=attachment.size
+    )
+
+
+class _FilePart:
+    """The `file` part of the multipart request: a handle that cannot be read
+    whole.
+
+    httpx2's multipart encoder takes a file-like object, asks `fileno()` for its
+    length — which is how the request gets a `Content-Length` instead of chunked
+    encoding — and then calls `read(65536)` until it gets nothing back. This is
+    that object, and it differs from the bare handle in three ways:
+
+      - a read NEVER returns more than `_PART_READ_CEILING_BYTES`, whatever is
+        asked for, `read()` with no argument included;
+      - it stops at the size that was prepared, so a file that grew is not sent
+        long;
+      - it checks the file is unchanged before every read and counts what it
+        hands over, for the progress report.
+
+    Deliberately no `seek` and no `tell`: the encoder rewinds a part that has
+    them, and this one is read exactly once.
+    """
+
+    def __init__(
+        self, handle: BinaryIO, attachment: TicketAttachment, progress: TransferProgress
+    ) -> None:
+        self._handle = handle
+        self._attachment = attachment
+        self._progress = progress
+        self._remaining = attachment.size
+
+    def fileno(self) -> int:
+        return self._handle.fileno()
+
+    def read(self, size: int | None = -1) -> bytes:
+        if self._remaining <= 0:
+            return b""
+
+        if not _unchanged(self._attachment):
+            raise _Abandon()
+
+        want = _PART_READ_CEILING_BYTES
+        if size is not None and 0 <= size < want:
+            want = size
+
+        chunk = self._handle.read(min(want, self._remaining))
+
+        if not chunk:
+            # Shorter than it was a moment ago.
+            raise _Abandon()
+
+        self._remaining -= len(chunk)
+        self._progress.sent(len(chunk))
+
+        return chunk
+
+
+async def _file_chunks(
+    handle: BinaryIO,
+    attachment: TicketAttachment,
+    progress: TransferProgress,
+    deadline_at: float,
+    clock: Any,
+    stopped: list[str],
+) -> AsyncGenerator[bytes, None]:
+    """The body of the object-store PUT: the file, a chunk at a time.
+
+    Exactly `attachment.size` bytes, which is the `Content-Length` that was
+    declared — never more if the file grew. Before EVERY chunk, the last
+    included, it checks the deadline and that the file has not changed; a send
+    that fails either check stops BEFORE its final bytes go, so the object
+    store never gets a complete body and never creates the object.
+
+    A stop is reported two ways: `stopped` gets the reason, for `_put_file`, and
+    `_Abandon` is raised into the HTTP stack to end the request.
+    """
+    remaining = attachment.size
+
+    while remaining > 0:
+        if clock() >= deadline_at:
+            stopped.append(UploadTransferError.DEADLINE)
+            raise _Abandon()
+
+        if not _unchanged(attachment):
+            stopped.append(UploadTransferError.FILE_CHANGED)
+            raise _Abandon()
+
+        chunk = handle.read(min(_PUT_CHUNK_BYTES, remaining))
+
+        if not chunk:
+            stopped.append(UploadTransferError.FILE_CHANGED)
+            raise _Abandon()
+
+        remaining -= len(chunk)
+        progress.sent(len(chunk))
+
+        yield chunk
+
+
+def _signed_upload(
+    payload: Mapping[str, Any], headers: Mapping[str, str], received_at: float
+) -> "_SignedUpload | str":
+    """Read a start response. Returns a `_SignedUpload`, or — when the response
+    is not usable — the `UploadTransferError` kind to raise.
+
+    🔴 IT RETURNS THE FAILURE INSTEAD OF RAISING IT, for the reason
+    `_SignedUpload` gives: this frame holds the response, and the response
+    holds the address. An exception raised from here would take both into a
+    traceback.
+
+    The documented shape, and nothing looser::
+
+        {"data": {"upload_id": "…", "status": "pending",
+                  "upload": {"method": "PUT", "url": "https://…",
+                             "headers": {"Content-Type": "video/mp4"},
+                             "expires_at": "2026-10-09T07:20:00Z"}}}
+
+        {"data": {"upload_id": "…", "status": "completed", …}}
+
+    The address must be `https://`, with a host and without credentials in it.
+    Plain http would send the file in the clear, and userinfo would make the
+    HTTP client add an `Authorization` header of its own.
+    """
+    malformed = UploadTransferError.MALFORMED_START
+
+    data = payload.get("data")
+    if not isinstance(data, Mapping):
+        return malformed
+
+    upload_id = data.get("upload_id")
+    if not isinstance(upload_id, str) or not upload_id:
+        return malformed
+
+    status = data.get("status")
+
+    if status == "completed":
+        return _SignedUpload(upload_id, completed=True, received_at=received_at)
+
+    upload = data.get("upload")
+    if status != "pending" or not isinstance(upload, Mapping):
+        return malformed
+
+    method, url, listed = upload.get("method"), upload.get("url"), upload.get("headers")
+
+    if not isinstance(method, str) or method.upper() != "PUT":
+        return malformed
+
+    if not isinstance(url, str) or not isinstance(listed, Mapping):
+        return malformed
+
+    if not all(isinstance(k, str) and isinstance(v, str) for k, v in listed.items()):
+        return malformed
+
+    try:
+        parts = urlsplit(url)
+        host, has_credentials = parts.hostname, bool(parts.username or parts.password)
+    except ValueError:
+        return malformed
+
+    if parts.scheme.lower() == "http":
+        return UploadTransferError.INSECURE_URL
+
+    if parts.scheme.lower() != "https" or not host or has_credentials:
+        return malformed
+
+    return _SignedUpload(
+        upload_id,
+        completed=False,
+        received_at=received_at,
+        address=url,
+        headers=listed,
+        expires_in=_seconds_until_expiry(upload.get("expires_at"), headers.get("Date")),
+    )
+
+
+def _seconds_until_expiry(expires_at: Any, date_header: str | None) -> float | None:
+    """Seconds from now until ONE MINUTE BEFORE the address expires, or None.
+
+    🔴 MEASURED ON THE DESK'S CLOCK, NOT THIS MACHINE'S. `expires_at` is an
+    absolute time on the clock that signed the address, and the response's own
+    `Date` header is that same clock saying what time it is now — so the
+    difference is the address's remaining life with no reference to a laptop's
+    idea of the time. A machine whose clock is an hour fast would otherwise
+    abandon every upload before it began, and one an hour slow would trust an
+    address long after it had expired. This machine's clock is the fallback
+    only when the header is missing.
+
+    None when `expires_at` is absent or unreadable: the 50-minute ceiling then
+    stands alone.
+    """
+    expiry = _instant(expires_at)
+
+    if expiry is None:
+        return None
+
+    now = None
+    if date_header:
+        try:
+            now = parsedate_to_datetime(date_header)
+        except (TypeError, ValueError):
+            now = None
+
+    if now is None:
+        now = datetime.now(timezone.utc)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    return (expiry - now).total_seconds() - _EXPIRY_MARGIN_SECONDS
+
+
+def _instant(value: Any) -> datetime | None:
+    """An ISO 8601 instant such as `2026-10-09T07:20:00Z`, or None."""
+    if not isinstance(value, str) or not value:
+        return None
+
+    try:
+        # `fromisoformat` learned the `Z` suffix in Python 3.11; this package's
+        # floor is 3.10.
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00").replace("z", "+00:00"))
+    except ValueError:
+        return None
+
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _wait_seconds(retry_after: str | None, fallback: float) -> float:
+    """A `Retry-After` in seconds, clamped; `fallback` when absent or unusable
+    (the header may also be an HTTP date, which is not worth parsing here)."""
+    try:
+        seconds = float(retry_after) if retry_after is not None else fallback
+    except ValueError:
+        seconds = fallback
+
+    if not math.isfinite(seconds):
+        seconds = fallback
+
+    return min(max(seconds, 0.0), _WAIT_CEILING_SECONDS)
+
+
+def _resolved_local_path(file_path: str, upload_root: str | None) -> tuple[Path, Path]:
+    """Where a tool's `file_path` argument really is: (as named, resolved).
+
+    The first half of every local read on this client, and the SAME half for
+    both tools that make one — `upload_kb_media` and `attach_file_to_ticket` —
+    so that there is one answer to "may this server read that file" and no
+    second copy of it to drift. It opens nothing and reads nothing.
+
+      1. `_upload_root` — the folder, or ConfigurationError while it is unset.
+      2. `~` is expanded, and a relative path is taken from that folder.
+      3. `_inside_upload_root` — `..` and every symlink resolved, and a real
+         location outside the folder refused, before the file is looked at.
+
+    Returns the path as the user named it (for messages, and for the name that
+    is sent) and its resolved location (for every read that follows). Reading
+    anything but the second would be checking one file and opening another.
+    """
+    if not isinstance(file_path, str) or not file_path.strip():
+        raise LocalFileError(str(file_path), "no path was given")
+
+    root = _upload_root(upload_root)
+
+    path = Path(file_path).expanduser()
+    if not path.is_absolute():
+        # Relative to the upload directory, NOT to this process's working
+        # directory — which, for a server a host launched, is wherever the host
+        # happened to be, and nothing a user could predict.
+        path = root / path
+
+    return path, _inside_upload_root(path, root)
+
+
 def _upload_root(configured: str | None) -> Path:
     """`EBTEQDESK_UPLOAD_ROOT`, resolved, or ConfigurationError naming the fix.
 
@@ -3387,8 +4786,15 @@ def _upload_root(configured: str | None) -> Path:
     These are ConfigurationErrors and not LocalFileErrors because the remedy is
     the operator's environment, not a different path from the user — the exact
     distinction `LocalFileError`'s docstring draws. Each message says that ONLY
-    uploads are affected, so a model does not conclude the whole server is
-    misconfigured.
+    the two tools that read a local file are affected, and names both, so a
+    model does not conclude the whole server is misconfigured — and does not
+    conclude either that the other file tool might still work.
+
+    ONE FOLDER FOR BOTH TOOLS (5.1.0). The variable means "the files this
+    server may send to the desk", not "the files meant for the knowledge base":
+    the control is about which local files may leave the machine, not about
+    where on the desk they land. A second variable for ticket attachments was
+    considered and rejected for that reason.
 
     The home directory and the filesystem root are refused as roots outright.
     Either one would satisfy the check below while restoring exactly the access
@@ -3397,13 +4803,14 @@ def _upload_root(configured: str | None) -> Path:
     """
     if not configured:
         raise ConfigurationError(
-            f"upload_kb_media is turned off: {ENV_UPLOAD_ROOT} is not set. This "
-            "server reads local files only from inside that one directory, and "
-            "with none configured it reads nothing. NOTHING WAS SENT TO "
-            "EBTEQDESK. To enable uploads, the operator chooses a dedicated "
-            "folder (for example ~/EbteqdeskUploads), registers the server with "
-            f"`--env {ENV_UPLOAD_ROOT}=<that folder>`, restarts it, and puts the "
-            "file there. Only this tool is affected; every other tool works."
+            f"{_LOCAL_FILE_TOOLS} are turned off: {ENV_UPLOAD_ROOT} is not "
+            "set. This server reads local files only from inside that one "
+            "directory, and with none configured it reads nothing. NOTHING WAS "
+            "SENT TO EBTEQDESK. To enable them, the operator chooses a "
+            "dedicated folder (for example ~/EbteqdeskUploads), registers the "
+            f"server with `--env {ENV_UPLOAD_ROOT}=<that folder>`, restarts it, "
+            f"and puts the file there. {_ONLY_LOCAL_FILE_TOOLS}; every other "
+            "tool works."
         )
 
     root = Path(configured).expanduser()
@@ -3413,7 +4820,7 @@ def _upload_root(configured: str | None) -> Path:
             f"{ENV_UPLOAD_ROOT}={configured!r} is not an absolute path. A relative "
             "one would be resolved against whatever directory the MCP host "
             "launched this server from. Set it to a full path such as "
-            "~/EbteqdeskUploads. Only upload_kb_media is affected."
+            f"~/EbteqdeskUploads. {_ONLY_LOCAL_FILE_TOOLS}."
         )
 
     try:
@@ -3422,13 +4829,13 @@ def _upload_root(configured: str | None) -> Path:
         raise ConfigurationError(
             f"{ENV_UPLOAD_ROOT}={configured!r} does not exist on this machine. "
             "Create that folder (or point the variable at one that exists) and "
-            "restart the server. Only upload_kb_media is affected."
+            f"restart the server. {_ONLY_LOCAL_FILE_TOOLS}."
         ) from None
 
     if not resolved.is_dir():
         raise ConfigurationError(
             f"{ENV_UPLOAD_ROOT}={configured!r} is not a directory. It must name "
-            "the folder uploads are read from. Only upload_kb_media is affected."
+            f"the folder uploads are read from. {_ONLY_LOCAL_FILE_TOOLS}."
         )
 
     try:
@@ -3439,10 +4846,10 @@ def _upload_root(configured: str | None) -> Path:
     if resolved == Path(resolved.anchor) or resolved == home:
         raise ConfigurationError(
             f"{ENV_UPLOAD_ROOT}={configured!r} is the home directory or the "
-            "filesystem root, which would let this tool read SSH keys, browser "
-            "profiles and every other private file under it. Choose a dedicated "
-            "folder that holds only files meant for the knowledge base, such as "
-            "~/EbteqdeskUploads. Only upload_kb_media is affected."
+            "filesystem root, which would let these tools read SSH keys, "
+            "browser profiles and every other private file under it. Choose a "
+            "dedicated folder that holds only files meant to be sent to the "
+            f"desk, such as ~/EbteqdeskUploads. {_ONLY_LOCAL_FILE_TOOLS}."
         )
 
     return resolved
@@ -3999,7 +5406,7 @@ def _activity_date(value: Any, argument: str) -> str:
         )
 
     try:
-        datetime.date.fromisoformat(value)
+        _date.fromisoformat(value)
     except ValueError:
         raise ValueError(
             f"{argument} is not a real calendar date: {value!r}."

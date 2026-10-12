@@ -402,8 +402,9 @@ is seven days old. Do not upload speculatively. If you upload something and then
 decide not to use it, say so rather than leaving the user thinking a file was
 filed somewhere.
 
-⚠️ **`upload_kb_media` reads the user's own filesystem.** It is the only tool
-here that does, and that is a risk to the **user**, not to the helpdesk. Upload
+⚠️ **`upload_kb_media` reads the user's own filesystem.** It is one of only two
+tools that do — the other is `attach_file_to_ticket`, in the `tickets` skill —
+and that is a risk to the **user**, not to the helpdesk. Upload
 **only files the user explicitly named**. Never sweep or list a directory looking
 for something suitable, and never guess at a path — if the one you were given
 does not exist, ask.
@@ -415,6 +416,13 @@ is refused before anything is read or sent. If an upload is refused for being
 outside it, ask the user to copy the file into that folder and give you the new
 path; if it is refused because the folder is not configured, tell the user
 uploads are off until the operator adds it. Do not try other paths.
+
+⚠️ **The folder is shared.** Since `ebteqdesk-mcp` 5.1.0 the same
+`EBTEQDESK_UPLOAD_ROOT` is what `attach_file_to_ticket` reads from, so a file
+put there for a ticket is readable by this tool too, and the reverse. The two
+are not interchangeable: this one stores media for an **article** and returns a
+`/kb/media/` url; that one files a file on a **ticket's** internal note. And
+only that one is safe to repeat.
 
 ⚠️ **Never retry a timed-out upload.** Every call stores a *new* copy under a
 *new* ULID, so a retry that "worked the second time" has left a duplicate nobody
