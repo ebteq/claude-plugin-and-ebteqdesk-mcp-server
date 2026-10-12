@@ -498,6 +498,10 @@ ENVELOPING_TOOLS = [
     "create_ticket",
     "comment_on_ticket",
     "add_private_note",
+    # Its receipt is a ticket, and its `attachment.name` is enveloped too — see
+    # test_ticket_attachments.py, which needs a file and an upload folder to
+    # call it and so asserts the shape there.
+    "attach_file_to_ticket",
     "escalate_ticket",
     "de_escalate_ticket",
     "set_ticket_status",

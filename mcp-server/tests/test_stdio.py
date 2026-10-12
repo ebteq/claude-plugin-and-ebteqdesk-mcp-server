@@ -62,6 +62,10 @@ EXPECTED_TOOLS = {
     "create_ticket",
     "comment_on_ticket",
     "add_private_note",
+    # The second tool that reads the user's own filesystem, and the one that can
+    # send a document rather than only a screenshot. Over the wire as well as
+    # in-process, for the reason given beside `upload_kb_media` below.
+    "attach_file_to_ticket",
     "escalate_ticket",
     "de_escalate_ticket",
     # One of the two ticket writes that email nobody. Over the wire as well
@@ -85,8 +89,8 @@ EXPECTED_TOOLS = {
     "update_kb_folder",
     "delete_kb_folder",
     "reorder_kb_children",
-    # The only tool that reads the user's own filesystem. Over the wire as well
-    # as in-process: a host that was served this tool is a host that can be
+    # One of the two tools that read the user's own filesystem. Over the wire as
+    # well as in-process: a host that was served this tool is a host that can be
     # asked to send a local file somewhere, so its presence is a fact worth
     # asserting on the bytes rather than on the Python object.
     "upload_kb_media",
@@ -193,6 +197,36 @@ async def test_the_tool_annotations_reach_a_real_client(  # 5.0.0
     assert tools["comment_on_ticket"].annotations.read_only_hint is False
     assert tools["comment_on_ticket"].annotations.destructive_hint is True
     assert tools["comment_on_ticket"].annotations.open_world_hint is True
+    # 5.1.0: the write a host may let a model repeat.
+    assert tools["attach_file_to_ticket"].annotations.read_only_hint is False
+    assert tools["attach_file_to_ticket"].annotations.destructive_hint is False
+    assert tools["attach_file_to_ticket"].annotations.idempotent_hint is True
+    assert tools["attach_file_to_ticket"].annotations.open_world_hint is False
+
+
+async def test_attaching_a_file_is_refused_over_the_wire_while_the_folder_is_unset(  # 5.1.0
+) -> None:
+    """The real subprocess, the real default: no `EBTEQDESK_UPLOAD_ROOT`, so
+    the tool reads nothing and says which variable turns it on — for BOTH tools
+    that need it. Nothing is sent anywhere; the base URL is a closed port and
+    is never tried."""
+    async with stdio_client(
+        _params(EBTEQDESK_BASE_URL=UNREACHABLE, EBTEQDESK_API_TOKEN="6|not-a-real-token")
+    ) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
+            result = await session.call_tool(
+                "attach_file_to_ticket", {"ticket_id": 42, "file_path": "/etc/hosts"}
+            )
+
+    text = _text(result)
+    assert result.is_error
+    assert "EBTEQDESK_UPLOAD_ROOT is not set" in text
+    assert "upload_kb_media and attach_file_to_ticket are turned off" in text
+    assert "NOTHING WAS SENT TO EBTEQDESK" in text
+    assert "Could not reach Ebteqdesk" not in text
+    assert "not-a-real-token" not in text
 
 
 async def test_a_remote_plain_http_base_url_is_refused_over_the_wire() -> None:

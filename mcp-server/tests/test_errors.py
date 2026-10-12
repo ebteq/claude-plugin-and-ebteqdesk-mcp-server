@@ -612,12 +612,13 @@ async def test_404_for_an_unknown_ticket_category_echoes_the_slug(make_client) -
 async def test_409_no_longer_diagnoses_itself_as_a_published_article(
     make_client,
 ) -> None:
-    """🔴 THE 409 HAS NO PRODUCER ANY MORE. It was the refusal for a PATCH of a
-    published knowledge base article; that request now stages a pending revision
-    and answers 202 (see test_kb_writes.py). The class is kept because it is
-    exported from the package root and because a proxy can still emit a 409 —
-    but its message must NOT keep asserting the removed rule, or the next real
-    409 gets a confident, wrong diagnosis.
+    """🔴 THE KNOWLEDGE BASE'S 409 HAS NO PRODUCER ANY MORE. It was the refusal
+    for a PATCH of a published knowledge base article; that request now stages a
+    pending revision and answers 202 (see test_kb_writes.py). Since 5.1.0 the
+    ticket-attachment routes DO answer 409, always with a `reason` (see
+    test_ticket_attachments.py); a 409 with none, as here, is a proxy or an
+    endpoint newer than this client, and its message must NOT keep asserting
+    the removed rule, or the next real 409 gets a confident, wrong diagnosis.
 
     So this asserts an ABSENCE, which is the only way to state the requirement:
     the words that would re-introduce the false explanation.

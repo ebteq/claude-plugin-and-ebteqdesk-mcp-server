@@ -1401,7 +1401,7 @@ async def test_the_server_instructions_carry_the_new_surface(tools) -> None:
     from, and that these writes cannot set visibility."""
     instructions = " ".join((srv.mcp.instructions or "").split())
 
-    assert "twenty-five tools that read and twenty-two that WRITE" in instructions
+    assert "twenty-five tools that read and twenty-three that WRITE" in instructions
 
     # ⚠️ This used to assert "`list_kb_tree` IS THE ONLY PLACE ONE COMES FROM",
     # and that sentence is no longer TRUE: `list_kb_categories` and
