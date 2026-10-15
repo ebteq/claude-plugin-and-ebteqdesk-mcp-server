@@ -92,7 +92,7 @@ and registration commands, along with the scopes a key needs; the long version i
 
 | Skill | Covers |
 |---|---|
-| `tickets` | read a ticket and its conversation, reply or file an internal note, move it between working states, close it |
+| `tickets` | read a ticket and its conversation, reply or file an internal note, edit or delete a reply or a note afterwards, move it between working states, close it |
 | `escalations` | the shared install-wide escalation queue, escalating and de-escalating, replying on an escalated ticket |
 | `knowledge-base` | search and read articles, walk the tree, create categories and folders, author an article to the house standard |
 | `reports` | the account-wide ticket report and the per-category escalation report, and the date traps that make them disagree; the Warni POS activity score (All businesses) and the dormant-customer review |
@@ -117,7 +117,7 @@ your host reports at connect time, treat these skills as possibly stale and trus
 tool descriptions over them.
 
 ⚠️ **Right now it does not match, and this is exactly where the gap is.** The server in
-this repository is **5.2.0, with 48 tools**. The skills have **not** been re-verified
+this repository is **5.3.0, with 52 tools**. The skills have **not** been re-verified
 against it — that is outstanding work in its own right, not something the repository merge
 did or could do. The known gaps:
 
@@ -129,6 +129,7 @@ did or could do. The known gaps:
 | 4.2.0 | the nine agent-provisioning tools — `list_agents`, `get_agent`, `list_roles`, `list_groups`, `list_api_keys`, `create_agent`, `update_agent`, `issue_api_key`, `revoke_api_key`. No skill mentions any of them; four write, two return a secret exactly once, and none can be undone through the API |
 | 5.1.0 | ✅ the four Warni Activity read tools — `activity_summary`, `activity_list`, `activity_list_dormant`, `activity_get_customer`. **Covered:** the `reports` skill was written against them and says so (`Verified against 5.1.0`); plan `all` is the default and `free` is legacy history only |
 | 5.2.0 | `attach_file_to_ticket` — attaches a file from the user's own machine to a ticket, on a new internal note. **Covered:** `tickets` and `escalations` each gained a section for it, and `knowledge-base` says the upload folder is now shared. Added without a full re-read of those files, so their "Verified against" lines did not move — see [`plugin/README.md`](plugin/README.md) |
+| 5.3.0 | `edit_ticket_comment`, `delete_ticket_comment`, `edit_private_note`, `delete_private_note` — rewrite or permanently delete an agent's public reply or internal note (any agent's, by the entry's `id` from the thread; only entries marked `agent_authored: true`). **None is an undo:** a public reply is on the requester's ticket page from the moment it is posted, and editing or deleting it changes that page without telling them. **Covered:** `tickets` and `escalations` each gained a section for them and lost the sentences saying no reply or note could ever be changed; `knowledge-base` no longer calls its two deletes the only ones on the server. Added without a full re-read, so the "Verified against" lines did not move — see [`plugin/README.md`](plugin/README.md) |
 
 What the skills *do* describe was checked against 1.6.0, and no tool that existed then has
 been renamed or removed, or changed the meaning of an argument a 1.6.0-era caller would

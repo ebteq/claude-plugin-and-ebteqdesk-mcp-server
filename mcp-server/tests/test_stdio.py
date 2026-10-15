@@ -62,6 +62,13 @@ EXPECTED_TOOLS = {
     "create_ticket",
     "comment_on_ticket",
     "add_private_note",
+    # The four that change a thread afterwards (5.3.0). Over the wire as well
+    # as in-process: two of them are deletes, and which deletes a host is
+    # actually served is a fact worth asserting on the bytes.
+    "edit_ticket_comment",
+    "delete_ticket_comment",
+    "edit_private_note",
+    "delete_private_note",
     # The second tool that reads the user's own filesystem, and the one that can
     # send a document rather than only a screenshot. Over the wire as well as
     # in-process, for the reason given beside `upload_kb_media` below.
@@ -81,7 +88,7 @@ EXPECTED_TOOLS = {
     "update_kb_article",
     "create_kb_category",
     "update_kb_category",
-    # The only two tools on this server that destroy anything. Over the wire as
+    # The two tools that destroy knowledge base structure. Over the wire as
     # well as in-process: a delete that registered but was not served would be
     # invisible to `test_server_tools` and visible here.
     "delete_kb_category",
@@ -202,6 +209,13 @@ async def test_the_tool_annotations_reach_a_real_client(  # 5.0.0
     assert tools["attach_file_to_ticket"].annotations.destructive_hint is False
     assert tools["attach_file_to_ticket"].annotations.idempotent_hint is True
     assert tools["attach_file_to_ticket"].annotations.open_world_hint is False
+    # 5.3.0: the two deletes a host should put a confirmation in front of —
+    # destructive, never auto-retried, and sending nothing to anyone.
+    for name in ("delete_ticket_comment", "delete_private_note"):
+        assert tools[name].annotations.read_only_hint is False
+        assert tools[name].annotations.destructive_hint is True
+        assert tools[name].annotations.idempotent_hint is False
+        assert tools[name].annotations.open_world_hint is False
 
 
 async def test_attaching_a_file_is_refused_over_the_wire_while_the_folder_is_unset(  # 5.1.0

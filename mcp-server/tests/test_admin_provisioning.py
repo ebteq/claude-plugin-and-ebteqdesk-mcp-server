@@ -663,7 +663,7 @@ async def test_the_instructions_carry_the_provisioning_rules() -> None:
     assert "RETURN A SECRET EXACTLY ONCE" in instructions
     assert "CAN NEVER GRANT `admin:read` OR `admin:write`" in instructions
     assert "delete-agent tool" in instructions.lower()
-    assert "twenty-five tools that read and twenty-three that WRITE" in instructions
+    assert "twenty-five tools that read and twenty-seven that WRITE" in instructions
 
     # 🔴 The two rules added after QA drove the escalation chain end to end.
     # Both belong in `instructions` rather than only in a tool description,

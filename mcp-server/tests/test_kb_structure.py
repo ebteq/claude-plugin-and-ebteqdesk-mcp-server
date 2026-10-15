@@ -1401,7 +1401,7 @@ async def test_the_server_instructions_carry_the_new_surface(tools) -> None:
     from, and that these writes cannot set visibility."""
     instructions = " ".join((srv.mcp.instructions or "").split())
 
-    assert "twenty-five tools that read and twenty-three that WRITE" in instructions
+    assert "twenty-five tools that read and twenty-seven that WRITE" in instructions
 
     # ⚠️ This used to assert "`list_kb_tree` IS THE ONLY PLACE ONE COMES FROM",
     # and that sentence is no longer TRUE: `list_kb_categories` and
@@ -1434,23 +1434,36 @@ async def test_the_server_instructions_state_the_two_portal_choice(tools) -> Non
     assert "permanently" in instructions.lower()
 
 
-async def test_exactly_two_tools_delete_anything_and_neither_touches_an_article(
+async def test_exactly_four_tools_delete_anything_and_none_touches_an_article(
     tools,
 ) -> None:
     """🔴 THE INVERSE OF THE TEST THAT USED TO STAND HERE, which asserted no tool
-    was called `delete` at all. Two now are, and the property worth guarding
-    moved rather than disappeared: the destructive surface is EXACTLY these two
-    structure-level tools, and an article, a ticket, a comment or a note delete
-    appearing would be a new and much larger claim about what this server can
-    destroy. An article delete in Ebteqdesk has no undo, no trash and no version
-    history, which is precisely why the two below refuse rather than cascade."""
+    was called `delete` at all. Four now are, and the property worth guarding
+    moved rather than disappeared: the destructive surface is EXACTLY these
+    four, and an article or a ticket delete appearing would be a new and much
+    larger claim about what this server can destroy. An article delete in
+    Ebteqdesk has no undo, no trash and no version history, which is precisely
+    why the two structure deletes refuse rather than cascade.
+
+    It was TWO until 5.3.0, when the reply and note deletes arrived — the
+    "comment or note delete appearing" this docstring used to name as the
+    failure. That is a reviewed widening, made with its own descriptions and
+    tests (test_thread_entry_edits.py), not one that appeared; the set is
+    still asserted whole so a fifth cannot."""
     every = {tool.name for tool in await srv.mcp.list_tools()}
 
     destructive = {
         name for name in every if "delete" in name or "destroy" in name or "remove" in name
     }
 
-    assert destructive == {"delete_kb_category", "delete_kb_folder"}
+    assert destructive == {
+        "delete_kb_category",
+        "delete_kb_folder",
+        "delete_ticket_comment",
+        "delete_private_note",
+    }
+    assert not {name for name in destructive if "article" in name}
+    assert "delete_ticket" not in destructive
 
 
 async def test_the_article_tools_still_do_not_mention_a_visibility_argument(

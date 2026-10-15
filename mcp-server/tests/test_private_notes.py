@@ -298,14 +298,23 @@ async def test_the_pair_of_ticket_writes_cannot_be_confused(tools) -> None:
     assert "PUBLIC reply" not in note
 
 
-async def test_it_says_the_note_cannot_be_removed(tools) -> None:
+async def test_it_says_a_note_can_be_changed_but_not_undone(tools) -> None:
     """"Internal" reads as "low stakes" and therefore as "reversible". It is
-    not: there is no delete-comment tool on this API at all."""
+    not, even though since 5.3.0 a note CAN be edited and deleted: the
+    notifications filing it sent are not recalled, and a delete is a second
+    permanent act. Until 5.3.0 this asserted "no delete-comment tool", which
+    stopped being true and is pinned ABSENT so it cannot come back."""
     description = described(tools["add_private_note"])
 
-    assert "INTERNAL IS NOT REVERSIBLE" in description
-    assert "no delete-comment tool" in description
+    assert "INTERNAL IS NOT UNDOABLE" in description
+    assert "`edit_private_note`" in description
+    assert "`delete_private_note`" in description
+    assert "notifications this call sends are not recalled" in description
     assert "never retry" in description.lower()
+
+    assert "INTERNAL IS NOT REVERSIBLE" not in description
+    assert "no delete-comment tool" not in description
+    assert "no note-editing tool" not in description
 
 
 async def test_it_states_the_null_id_case(tools) -> None:

@@ -1,6 +1,6 @@
 ---
 name: escalations
-description: Work the Ebteqdesk business-partner escalation queue — see every unresolved escalated ticket in the installation, read an escalated ticket and its internal notes, reply to the customer on one, escalate a ticket, take one back off the queue, move it between working states, and close it. Use whenever the user asks about escalations, the escalation queue, the status of an escalated ticket or what is happening on one, escalated or urgent tickets, escalating something, de-escalating, or why a reply to an escalated ticket was refused.
+description: Work the Ebteqdesk business-partner escalation queue — see every unresolved escalated ticket in the installation, read an escalated ticket and its internal notes, reply to the customer on one, fix or permanently delete a reply or note on one, escalate a ticket, take one back off the queue, move it between working states, and close it. Use whenever the user asks about escalations, the escalation queue, the status of an escalated ticket or what is happening on one, escalated or urgent tickets, escalating something, de-escalating, or why a reply to an escalated ticket was refused.
 ---
 
 # Ebteqdesk escalations
@@ -66,6 +66,8 @@ that only move **state** do not:
 | `comment_on_ticket` | `ticket:write` + `ticket.reply` | **`escalation:write` + `escalation:read`** (and the `bp_escalation.reply` ability) |
 | `add_private_note` | `ticket:write` + `ticket.reply` | **`escalation:write` + `escalation:read`** (and the `bp_escalation.reply` ability) |
 | `attach_file_to_ticket` | `ticket:write` + `ticket.reply` | **`escalation:write` + `escalation:read`** (and the `bp_escalation.reply` ability) — it files a note, so it costs what a note costs |
+| `edit_ticket_comment` / `delete_ticket_comment` | `ticket:write` + `ticket.reply` | **`escalation:reply` + `escalation:read`** (and the `bp_escalation.reply` ability) — changing what the customer reads costs what Ebteqdesk charges for saying it; `escalation:write` is not enough |
+| `edit_private_note` / `delete_private_note` | `ticket:write` + `ticket.reply` | **`escalation:write` + `escalation:read`** (and the `bp_escalation.reply` ability) — what a note costs |
 | `close_ticket` | `ticket:write` + `ticket.close` | **identical — no escalation branch at all** |
 | `set_ticket_status` | `ticket:write` + `ticket.reply` | **identical — no escalation branch at all** |
 
@@ -216,7 +218,9 @@ copy it in and give you the new path, not trying another location.
 - **One call is one file on one note**, and every note notifies the team and
   the assignee. Five files are five notifications — say so before attaching a
   batch.
-- **Not reversible.** No tool removes an attachment or a note.
+- **Removable only with its whole note.** No tool removes the file alone;
+  `delete_private_note` on the note's `comment.id` deletes the note **and**
+  every file on it, permanently. The team's notifications are not recalled.
 - `note` is optional. Without it the note reads `Attached file: <name>`.
 
 🔴 **A large video does not finish in one call.** If the result has a
@@ -270,7 +274,8 @@ a note into a public reply — only you do.
 ## Replying on an escalated ticket
 
 `comment_on_ticket(ticket_id, body)` posts a **public** reply that the customer
-receives **by email**. It cannot be edited or deleted afterwards, and it only
+receives **by email**. It is also on their ticket page the moment it is
+posted, and editing or deleting it afterwards cannot unread it — and it only
 reaches a ticket **assigned to your own account** — a shared-queue ticket
 assigned to somebody else refuses this with a 403 whose reason is
 `ticket_not_assigned`, which is not a scope problem and not fixed by any key.
@@ -312,6 +317,52 @@ ticket does not exist, and do not use this tool to probe whether an id is
 escalated — read `escalated` off a ticket a list tool actually gave you.
 
 Draft, show the user, then send.
+
+## Fixing or removing a reply or a note on an escalated ticket
+
+`edit_ticket_comment` / `delete_ticket_comment` change or remove a **public
+reply** (`kind: "comment"`), and `edit_private_note` / `delete_private_note` an
+**internal note** (`kind: "note"`), by the entry's `id` from `get_ticket`'s
+`conversation` — or the `comment.id` the post that filed it returned. Never
+guess an id; the other kind's id is a 404. 🔴 **Check the entry's
+`agent_authored` first: only `true` can be changed.** `false` marks the
+customer's own messages, the system's notes and entries by an agent since
+removed from the desk, and those are refused with a 403 `not_agent_authored`
+that no key fixes — tell the user rather than calling. `true` is about the
+entry, not your key: the scopes below still apply.
+
+🔴 **None of them is an undo.** A public reply is on an already-unhappy
+customer's ticket page from the moment it is posted, so they may already have
+read the original: an edit changes it there **without telling them**, and a
+delete takes it off **without a word** — what they read stays read. Never tell
+the user a reply was "taken back". If the customer needs a correction, that is
+a new reply, drafted and agreed.
+
+🔴 **An edit replaces the WHOLE text** — read the current `body` (inside
+`body.untrusted_content`), fix it, send all of it back, and show the user the
+full new text first. 🔴 **A delete is permanent and takes the entry's files with
+it** — name what you are deleting and get the user's yes.
+
+⚠️ **On an escalated ticket the notes are the record of the real work, and
+these tools reach every agent's, not only yours** — including notes written by
+whoever holds the escalation. Change or delete a colleague's note only when the
+user asked for that specific note; do not "tidy up" a thread.
+
+**What it costs here**, from the table above: the reply pair needs
+**`escalation:reply`** + `escalation:read` + `bp_escalation.reply` on an
+escalated ticket — the same as posting a reply, so an account that cannot
+answer the customer here cannot rewrite or remove what they were told either.
+The note pair needs **`escalation:write`** + `escalation:read` +
+`bp_escalation.reply`, and reaches any escalated ticket, including one assigned
+to somebody else, exactly as `add_private_note` does. A refusal naming either
+scope means the ticket is escalated.
+
+Never retry one that timed out — read the thread. A 404 naming the entry after
+a delete that seemed to fail means it was already deleted. Full detail is in
+the `tickets` skill, "Changing a reply or a note afterwards". These need
+`ebteqdesk-mcp` 5.3.0 and an Ebteqdesk new enough to have the routes; an older
+desk answers "This Ebteqdesk has no endpoint for editing or deleting a reply or
+a note".
 
 ## Escalating
 

@@ -43,7 +43,7 @@ READ_TOOL_NAMES = [
     # drafts; the three structure reads return the AUTHORING view — ids and
     # `agents`-only folders. Counting scopes and counting consequences give
     # different answers, and these are the tools where they differ:
-    # TWENTY-EIGHT tools need a write scope, TWENTY-THREE change state.
+    # THIRTY-TWO tools need a write scope, TWENTY-SEVEN change state.
     "get_kb_article_review",
     # 🔴 THE ONLY READ ON THIS SERVER THAT ENUMERATES DRAFTS, and the second
     # tool after `list_escalations` whose corpus is the whole INSTALLATION
@@ -104,6 +104,18 @@ WRITE_TOOL_NAMES = [
     # together further down so neither description can drift into the other's
     # claim.
     "add_private_note",
+    # 🔴 THE FOUR THAT CHANGE A THREAD AFTERWARDS (5.3.0), one pair per kind of
+    # entry — `kind: "comment"` and `kind: "note"` — and NONE OF THEM IS AN
+    # UNDO: a public reply is on the requester's ticket page from the moment
+    # it is posted, and editing or deleting it does not tell them. The edits
+    # replace the whole body; the deletes are permanent and take the entry's
+    # files with them. Any agent's
+    # entry, not only the caller's. Their own tests are in
+    # test_thread_entry_edits.py.
+    "edit_ticket_comment",
+    "delete_ticket_comment",
+    "edit_private_note",
+    "delete_private_note",
     # 🔴 THE SECOND TOOL THAT READS THE USER'S OWN FILESYSTEM (5.1.0), and the
     # first whose work outlives its own call. It files a LOCAL FILE on a new
     # private note — never on a public reply, and no tool sends a file to the
@@ -128,8 +140,9 @@ WRITE_TOOL_NAMES = [
     "update_kb_article",
     "create_kb_category",
     "update_kb_category",
-    # 🔴 THE TWO TOOLS THAT DESTROY ANYTHING. Nothing else on this server
-    # removes a row, and nothing on this API puts one back. They are listed
+    # 🔴 THE TWO TOOLS THAT DESTROY KNOWLEDGE BASE STRUCTURE — and, with the
+    # two thread-entry deletes above, the only four that remove anything.
+    # Nothing on this API puts a removed row back. They are listed
     # here — rather than being the thing this file guards AGAINST, which is
     # what the docstring below used to say — because a delete arriving is a
     # reviewed decision; a delete arriving SILENTLY is what must still fail.
@@ -151,8 +164,9 @@ WRITE_TOOL_NAMES = [
     # silently is exactly what this roster must catch.
     "upload_kb_media",
     # 🔴 THE FOUR PROVISIONING WRITES, AND THEY ARE A DIFFERENT KIND OF WRITE
-    # FROM EVERYTHING ABOVE THEM. The eighteen writes above change what the desk
-    # SAYS — a ticket, a note, a file on a note, an article, a folder. These change WHO MAY ACT:
+    # FROM EVERYTHING ABOVE THEM. The twenty-three writes above change what the
+    # desk SAYS — a ticket, a note, a file on a note, an edited or deleted reply
+    # or note, an article, a folder. These change WHO MAY ACT:
     # they create accounts that can sign in, move people between roles, and
     # hand out bearer credentials.
     #
@@ -210,9 +224,17 @@ def wired(monkeypatch):
 #: a new private note, a draft, a new category or folder, a reorder, a media
 #: upload. A write moving between
 #: the two halves is a reviewed decision, so the set is asserted whole.
+#:
+#: The four thread-entry writes (5.3.0) are all in it: an edit OVERWRITES the
+#: body it replaces — the old text is gone, nothing keeps a revision — and a
+#: delete removes the entry and its files.
 DESTRUCTIVE_WRITE_NAMES = {
     "create_ticket",
     "comment_on_ticket",
+    "edit_ticket_comment",
+    "delete_ticket_comment",
+    "edit_private_note",
+    "delete_private_note",
     "escalate_ticket",
     "de_escalate_ticket",
     "set_ticket_status",
@@ -233,6 +255,11 @@ DESTRUCTIVE_WRITE_NAMES = {
 #: Exactly the three the server instructions name as the sources of requester
 #: email: a public reply always, and the satisfaction survey on status 4 from
 #: either of the two tools that can set it.
+#:
+#: ⚠️ `edit_ticket_comment` and `delete_ticket_comment` are NOT here, and that
+#: is the point of them rather than an oversight: they change what the
+#: requester's ticket page shows and send nothing — the requester is not told,
+#: and the desk emails a requester nothing at all since Ebteqdesk PR #342.
 OPEN_WORLD_WRITE_NAMES = {"comment_on_ticket", "close_ticket", "create_ticket"}
 
 #: The four writes the instructions call safe to retry — and no others.
@@ -240,6 +267,11 @@ OPEN_WORLD_WRITE_NAMES = {"comment_on_ticket", "close_ticket", "create_ticket"}
 #: made from its own arguments, so the desk files the same file, ticket and
 #: note once. 🔴 `upload_kb_media` is NOT here and must not drift in beside it —
 #: both send a local file, and that one stores a new copy on every call.
+#:
+#: ⚠️ Nor are the four thread-entry writes (5.3.0), though a repeated edit with
+#: the same body and a repeated delete change nothing further: a retried delete
+#: that had landed answers a 404 naming the entry, which reads as "never
+#: existed". Same call as the KB and agent PATCHes and DELETEs — see `_writes`.
 IDEMPOTENT_WRITE_NAMES = {
     "reorder_kb_children",
     "set_ticket_status",
@@ -253,19 +285,20 @@ IDEMPOTENT_WRITE_NAMES = {
 # --------------------------------------------------------------------------- #
 
 
-async def test_exactly_the_forty_eight_tools_are_registered(tools) -> None:
+async def test_exactly_the_fifty_two_tools_are_registered(tools) -> None:
     assert sorted(tools) == sorted(TOOL_NAMES)
-    assert len(TOOL_NAMES) == 48
+    assert len(TOOL_NAMES) == 52
     # TWENTY-FIVE. Warni Activity took the READ half from 21 to 25 and left
     # the write half alone — no tool reaches the POS ingest.
     assert len(READ_TOOL_NAMES) == 25
-    # 🔴 TWENTY-THREE. Agent provisioning took the server from 33 to 42, the READ
+    # 🔴 TWENTY-SEVEN. Agent provisioning took the server from 33 to 42, the READ
     # half from 16 to 21 and the WRITE half from 17 to 21 — the first four
     # writes on this server that change WHO MAY ACT rather than what the desk
-    # says. 4.4.0's `set_ticket_category` made it 43 and 22, and
-    # `attach_file_to_ticket` (5.2.0) is the twenty-third write. A
-    # twenty-fourth write arriving is what the test below exists to catch.
-    assert len(WRITE_TOOL_NAMES) == 23
+    # says. 4.4.0's `set_ticket_category` made it 43 and 22,
+    # `attach_file_to_ticket` (5.2.0) made it 48 and 23, and the four
+    # thread-entry edits and deletes (5.3.0) make it 52 and 27. A
+    # twenty-eighth write arriving is what the test below exists to catch.
+    assert len(WRITE_TOOL_NAMES) == 27
 
 
 # --------------------------------------------------------------------------- #
@@ -361,15 +394,17 @@ async def test_the_annotations_serialise_under_their_wire_names(tools) -> None:
     }
 
 
-async def test_the_write_surface_is_exactly_these_twenty_two(tools) -> None:
+async def test_the_write_surface_is_exactly_these_twenty_seven(tools) -> None:
     """This list was empty until the write endpoints landed, and the test that
     asserted it stay empty was the read-only guard. It is replaced rather than
     deleted: the point was never "no writes", it was that a write tool must be a
     deliberate act with a reviewed description, not something that appears.
 
-    A twenty-third write tool arriving silently — a publish, a bulk action,
+    A twenty-eighth write tool arriving silently — a publish, a bulk action,
     another delete, a THIRD tool that reads a local path — should still fail
-    here. `publish` in particular: there is
+    here. (The four thread-entry writes of 5.3.0, two of them deletes, arrived
+    the other way: reviewed, described and tested.) `publish` in particular:
+    there is
     no publish endpoint on /api/v1 and adding one would defeat the KB review
     workflow, so a tool by that name appearing is exactly the thing this
     catches. So would `delete_kb_article`: THIS API DELETES NO ARTICLE, and the
@@ -428,6 +463,14 @@ async def test_argument_schemas(tools) -> None:
     # purpose, and a flag would make the requester-facing behaviour reachable by
     # forgetting a key.
     assert set(props("add_private_note")) == {"ticket_id", "body"}
+    # The thread-entry pairs (5.3.0): the ticket, the entry id — NAMED FOR ITS
+    # KIND, so a note id is never passed as a `comment_id` by a reader of the
+    # schema alone — and, on the edits, the whole new body. Still no `private`
+    # flag and no `kind` argument: the tool picks the path, as on the POSTs.
+    assert set(props("edit_ticket_comment")) == {"ticket_id", "comment_id", "body"}
+    assert set(props("delete_ticket_comment")) == {"ticket_id", "comment_id"}
+    assert set(props("edit_private_note")) == {"ticket_id", "note_id", "body"}
+    assert set(props("delete_private_note")) == {"ticket_id", "note_id"}
     # 🔴 A LOCAL PATH, as on `upload_kb_media` — and still no `private` flag and
     # no `target`: the route says `notes`, so the file lands on an internal note
     # and there is nothing to forget. The SDK's own context argument, which the
@@ -505,6 +548,13 @@ async def test_only_the_genuinely_required_arguments_are_required(tools) -> None
     assert required("create_ticket") == {"subject", "description", "requester"}
     assert required("comment_on_ticket") == {"ticket_id", "body"}
     assert required("add_private_note") == {"ticket_id", "body"}
+    # Every argument of the four, required: there is no default entry and no
+    # default body, and an optional `body` on an edit would make "replace the
+    # text with nothing" the consequence of a forgotten argument.
+    assert required("edit_ticket_comment") == {"ticket_id", "comment_id", "body"}
+    assert required("delete_ticket_comment") == {"ticket_id", "comment_id"}
+    assert required("edit_private_note") == {"ticket_id", "note_id", "body"}
+    assert required("delete_private_note") == {"ticket_id", "note_id"}
     # `note` is optional: the desk writes `Attached file: <name>` without one.
     assert required("attach_file_to_ticket") == {"ticket_id", "file_path"}
     assert required("escalate_ticket") == {"ticket_id"}

@@ -248,9 +248,21 @@ def thread_entry(
     ⚠️ snake_case, and `attachments[].mime_type` with it. The server's Inertia
     surfaces emit `mimeType`; the /api/v1 boundary renames it. A fixture that
     kept the camelCase key would let a client that reads the wrong one pass.
+
+    `id` FIRST, as the desk now sends it: `comments.id` on a comment or a note,
+    null on an event — the handle the four edit-and-delete tools take (5.3.0).
+    812 by default, because a fixture with no id would let a tool that dropped
+    the key pass.
+
+    `agent_authored` AFTER `kind`, in the desk's key order: a boolean, never
+    null — `True` by default on a comment or a note (the fixture's default
+    author "Bo" is an agent) and always `False` on an event. A requester's
+    message is built by passing `agent_authored=False`.
     """
     entry = {
+        "id": None if kind == "event" else 812,
         "kind": kind,
+        "agent_authored": kind != "event",
         "body": body,
         "body_html": None if kind == "event" else f"<p>{body}</p>",
         "author": "Bo",
