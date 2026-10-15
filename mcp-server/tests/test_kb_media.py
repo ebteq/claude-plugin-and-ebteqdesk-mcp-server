@@ -809,4 +809,4 @@ async def test_the_instructions_carry_the_same_two_rules() -> None:
     assert "two tools read the local filesystem" in instructions.lower()
     assert "`upload_kb_media`" in instructions
     assert "Never retry a timed-out `upload_kb_media`" in instructions
-    assert "TWENTY-THREE WRITE TOOLS" in instructions
+    assert "TWENTY-SEVEN WRITE TOOLS" in instructions

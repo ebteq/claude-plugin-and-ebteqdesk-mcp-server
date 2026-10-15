@@ -3593,6 +3593,12 @@ async def attach_tool():
 #: The other five paragraphs are the ADR's, word for word. This list is the
 #: text of record until the ADR is brought into line with it; it is copied here
 #: rather than read from the ADR, which lives in the desk's repository.
+#:
+#: 🔴 PARAGRAPH FOUR CHANGED IN 5.3.0, and it is the one ADR paragraph that is no
+#: longer word for word. It said "There is no tool that removes an attachment
+#: or a note", which `delete_private_note` made false: deleting the note is now
+#: the one way the file comes off the ticket. The old sentence is pinned ABSENT
+#: below.
 DESCRIPTION = [
     "WRITES TO EBTEQDESK — attaches a LOCAL FILE to a ticket, on a new INTERNAL note. "
     "The requester is NOT emailed and cannot see the file.",
@@ -3604,10 +3610,12 @@ DESCRIPTION = [
     "🔴 IT READS ONLY INSIDE ONE FOLDER, `EBTEQDESK_UPLOAD_ROOT`, AND REFUSES EVERY "
     "CALL WHILE THAT IS UNSET. If a file is outside it, ask the user to copy it in and "
     "give you the new path. Do not try other locations.",
-    "🔴 INTERNAL, NOT INVISIBLE, AND NOT REVERSIBLE. The note and the file are seen by "
-    "every agent who can open the ticket, and the team and the assignee are notified. "
-    "There is no tool that removes an attachment or a note. To send a file to the "
-    "requester, this is the wrong tool and there is no right one.",
+    "🔴 INTERNAL, NOT INVISIBLE, AND NOT UNDONE BY ANYTHING. The note and the file are "
+    "seen by every agent who can open the ticket, and the team and the assignee are "
+    "notified. No tool removes the file alone: `delete_private_note` on the note's "
+    "`comment.id` removes the note AND every file on it, permanently, and recalls no "
+    "notification. To send a file to the requester, this is the wrong tool and there "
+    "is no right one.",
     "ONE FILE PER CALL. Accepted: images (JPEG, PNG, GIF, WebP), video (MP4, MOV, "
     "WebM), and PDF, Word, Excel, PowerPoint, CSV, TXT and ZIP, up to 20 MB. A video "
     "may be up to 500 MB where the desk has large uploads switched on. ⚠️ THAT "
@@ -3669,6 +3677,8 @@ async def test_the_description_no_longer_says_the_five_things_that_were_not_true
         "that starts a second upload",
         "and gives up after 50 minutes",
         "The same file, ticket and note is attached once.",
+        # 5.3.0: false since `delete_private_note`.
+        "There is no tool that removes an attachment or a note.",
     ):
         assert untrue not in description, untrue
 
@@ -3737,14 +3747,17 @@ async def test_the_other_file_tool_no_longer_claims_to_be_the_only_one() -> None
 
 
 async def test_the_instructions_count_and_name_the_new_tool() -> None:
-    """Every count and list a twenty-third write tool moves, in one place."""
+    """Every count and list a twenty-third write tool moved, in one place —
+    since moved again by the four thread-entry writes of 5.3.0, which is why
+    the numbers below are 5.3.0's and not 5.2.0's."""
     instructions = " ".join((srv.mcp.instructions or "").split())
 
-    assert "forty-eight tools in total" in instructions
-    assert "twenty-five tools that read and twenty-three that WRITE" in instructions
-    assert "TWENTY-EIGHT tools require a write scope while only TWENTY-THREE change state" in instructions
-    assert "THE TWENTY-THREE WRITE TOOLS" in instructions
-    assert "TWO OF THE TWENTY-THREE DESTROY STRUCTURE" in instructions
+    assert "fifty-two tools in total" in instructions
+    assert "twenty-five tools that read and twenty-seven that WRITE" in instructions
+    assert "THIRTY-TWO tools require a write scope while only TWENTY-SEVEN change state" in instructions
+    assert "THE TWENTY-SEVEN WRITE TOOLS" in instructions
+    assert "TWO OF THE TWENTY-SEVEN DESTROY STRUCTURE" in instructions
+    assert "`attach_file_to_ticket`" in instructions
 
     # The retry-safe list, in both places it is stated.
     assert "exactly FOUR exceptions" in instructions
@@ -3759,7 +3772,18 @@ async def test_the_instructions_count_and_name_the_new_tool() -> None:
     assert "a `transfer` key and no `attachment` means NOTHING IS ATTACHED YET" in instructions
 
     # No stale count survives beside the new ones.
-    for stale in ("forty-seven tools in total", "twenty-two that WRITE", "TWENTY-SEVEN", "TWENTY-TWO", "SEVENTEEN"):
+    # "TWENTY-SEVEN" used to be on this list as a stale scope count; since
+    # 5.3.0 it is the CURRENT write count, so 5.2.0's numbers replace it.
+    for stale in (
+        "forty-seven tools in total",
+        "forty-eight tools in total",
+        "twenty-two that WRITE",
+        "twenty-three that WRITE",
+        "TWENTY-THREE",
+        "TWENTY-EIGHT",
+        "TWENTY-TWO",
+        "SEVENTEEN",
+    ):
         assert stale not in instructions
 
 

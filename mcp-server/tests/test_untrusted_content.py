@@ -498,6 +498,11 @@ ENVELOPING_TOOLS = [
     "create_ticket",
     "comment_on_ticket",
     "add_private_note",
+    # The two edits (5.3.0) hand back ONE thread entry, wrapped like any other.
+    # The two deletes are deliberately absent: their receipt is
+    # `{id, kind, deleted}` and carries no text at all.
+    "edit_ticket_comment",
+    "edit_private_note",
     # Its receipt is a ticket, and its `attachment.name` is enveloped too — see
     # test_ticket_attachments.py, which needs a file and an upload folder to
     # call it and so asserts the shape there.

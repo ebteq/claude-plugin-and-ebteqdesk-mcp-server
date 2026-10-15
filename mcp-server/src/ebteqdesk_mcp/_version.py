@@ -759,4 +759,76 @@ __all__ = ["__version__"]
 #:
 #: ⚠️ THE PLUGIN'S SKILLS GAINED THE TOOL AND THE NEW COUNT, AND THEIR "VERIFIED
 #: AGAINST" LINES WERE NOT MOVED — the same call 5.0.0 made, for the same reason.
-__version__ = "5.2.0"
+#:
+#: 5.3.0 — A THREAD CAN BE CHANGED AFTERWARDS. FOUR tools ADDED —
+#: `edit_ticket_comment`, `delete_ticket_comment`, `edit_private_note`,
+#: `delete_private_note` — over the four new desk routes PATCH|DELETE
+#: /api/v1/tickets/{id}/comments/{comment_id} and …/notes/{note_id}, taking the
+#: server from 48 to 52 and its write half from 23 to 27; 32 tools now need a
+#: write scope (was 28). A MINOR on the rule every minor above it applies: every
+#: tool present in 5.2.0 keeps its name, arguments, defaults and return shape,
+#: `close_ticket` still defaulting to 5, and code written against 5.2.0 cannot be
+#: calling a tool that did not exist in it. The retry-safe writes stay FOUR: the
+#: new ones are `destructive=True`, `idempotent=False`, `open_world=False`, and
+#: the middle hint is a decision recorded beside `_writes` in server.py.
+#:
+#: 🔴 WHO MAY IS WHOEVER MAY POST THAT KIND OF ENTRY ON THAT TICKET — the desk
+#: owner's decision of 2026-10-15, with NO author check. So any agent's reply or
+#: note can be rewritten or removed, not only the caller's; the reply pair costs
+#: `escalation:reply` on an escalated ticket and the note pair `escalation:write`,
+#: exactly as the two POSTs do, and the requester's own messages and the desk's
+#: system notes are refused for everyone (403 `not_agent_authored`, its own
+#: exception, `NotAgentAuthoredError`). Every description says all three.
+#:
+#: 🔴 AND NONE OF THE FOUR IS AN UNDO, WHICH IS WHAT EACH ONE LEADS WITH. A public
+#: reply is on the requester's ticket page from the moment it is posted, so they
+#: may already have read the original; editing it sends them nothing and
+#: deleting it takes it off that page without telling them. (Nothing is emailed
+#: either way: the desk stopped emailing requesters in Ebteqdesk PR #342, and
+#: these routes exist only on desks that carry it. A first cut of this release
+#: said "the email is NOT recalled", which was wrong on every desk these tools
+#: can reach.) An edit REPLACES THE WHOLE BODY; a delete is HARD and
+#: takes the entry's attachments with it — `delete_private_note` is therefore
+#: also the only way a file `attach_file_to_ticket` filed comes off a ticket,
+#: and that tool's description, which said no tool removes one, now says so.
+#:
+#: ⚠️ FIVE SENTENCES THAT WERE TRUE ARE NOT ANY MORE, and were corrected rather
+#: than left: the instructions' "Neither can be edited or deleted afterwards",
+#: their "no delete-comment, no delete-note" list, `add_private_note`'s
+#: "INTERNAL IS NOT REVERSIBLE … no note-editing tool", `comment_on_ticket`'s
+#: "cannot be edited or deleted through this API", and `attach_file_to_ticket`'s
+#: "There is no tool that removes an attachment or a note". A message is not a
+#: contract, but anything matching the old sentences will stop matching.
+#:
+#: ⚠️ ADDITIVE ON THE READ SIDE, AND NOT THIS PACKAGE'S CHANGE: every entry of
+#: `get_ticket`'s `conversation` and of `get_ticket_comments` — and the entry the
+#: two edits return — now OPENS with `id` (the entry's `comments.id`, null on an
+#: event) and carries `agent_authored` after `kind`: a boolean, never null,
+#: `true` exactly on the entries the four tools accept and `false` on the
+#: requester's messages, system notes, entries by an agent since deleted from
+#: the desk, and every event — the same predicate as the 403. The desk added
+#: both with the routes; this package passed every entry key through already
+#: and still does, unwrapped, since neither is text anyone typed. The
+#: descriptions changed to say what each is for, and every one of the four
+#: tools tells a model to CHECK `agent_authored` before calling, rather than
+#: infer authorship from `author` — the guidance the first cut of this release
+#: carried before the desk exposed the flag.
+#:
+#: ALSO NEW, AND ADDITIVE: `NotAgentAuthoredError` and `StaleThreadEntryApiError`
+#: (a 404 with no `error` key on the new routes — the desk predates them, the
+#: same signal `StaleAttachmentApiError` reads), the reason constant
+#: `NOT_AGENT_AUTHORED_REASON`, and two narrowers for the escalated-ticket
+#: refusals, `escalated_comment_edit_error` and `escalated_note_edit_error`,
+#: which name the act that was refused rather than reusing the POST routes'
+#: sentences about replying and noting.
+#:
+#: 🔴 IT WAS WRITTEN AHEAD OF THE DESK IT TALKS TO, AGAIN. The four routes are on
+#: the desk's `feature/comment-edit-delete` branch and were read from its
+#: controller, routes and feature test (`TicketThreadEntryEditsTest`); this
+#: release was exercised against a fake of them at the socket and NOT against a
+#: running desk. Against a desk without them the tools raise
+#: `StaleThreadEntryApiError` rather than report a missing ticket or entry.
+#:
+#: ⚠️ THE PLUGIN'S SKILLS GAINED THE TOOLS, AND THEIR "VERIFIED AGAINST" LINES
+#: WERE NOT MOVED — the same call 5.0.0 and 5.2.0 made, for the same reason.
+__version__ = "5.3.0"

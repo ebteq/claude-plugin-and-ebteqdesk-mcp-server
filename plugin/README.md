@@ -4,8 +4,8 @@ Four Claude Code skills for working an Ebteqdesk helpdesk through its MCP server
 
 | Skill | Covers |
 |---|---|
-| `ebteqdesk:tickets` | List and read tickets (own queue, or the whole account with `scope="all"`), the full conversation, attachments, attach a local file on an internal note, reply, internal notes, move a ticket between working states or reopen one, change or clear a ticket's type, open a ticket, close one |
-| `ebteqdesk:escalations` | The shared escalation queue, reading and replying on escalated tickets, escalate, de-escalate, close |
+| `ebteqdesk:tickets` | List and read tickets (own queue, or the whole account with `scope="all"`), the full conversation, attachments, attach a local file on an internal note, reply, internal notes, edit or permanently delete a reply or a note, move a ticket between working states or reopen one, change or clear a ticket's type, open a ticket, close one |
+| `ebteqdesk:escalations` | The shared escalation queue, reading and replying on escalated tickets, editing or deleting a reply or note on one, escalate, de-escalate, close |
 | `ebteqdesk:knowledge-base` | Search and read articles (including per-language versions), the category/folder tree across Ebteqdesk's two knowledge bases (Salon V3 and Warni), propose and update articles, check a review verdict or the proposal queue, upload and embed screenshots, create/delete categories and folders, reorder |
 | `ebteqdesk:reports` | The account-wide ticket report, the per-category escalation report, and the Warni POS activity score (summary first, then the dormant-customer review) |
 
@@ -221,6 +221,22 @@ and a row in their scope-asymmetry table; `knowledge-base` now says the upload
 folder is shared between the two tools that read local files; `reports` did not
 change. What was checked is the text that was added, against the new tool's own
 description — not the rest of each file.
+
+⚠️ **`ebteqdesk-mcp` 5.3.0 added four tools, and the skills were edited for
+them WITHOUT a full re-read.** The server now has **52 tools**:
+`edit_ticket_comment`, `delete_ticket_comment`, `edit_private_note` and
+`delete_private_note` rewrite or permanently delete an agent's public reply or
+internal note — any agent's, by the entry's `id` from the thread, and only an
+entry the thread marks `agent_authored: true` — and **none of them is an undo**:
+a public reply is on the requester's ticket page from the moment it is posted,
+so they may already have read it, and editing or deleting it changes that page
+without telling them. `tickets` and `escalations` each gained a
+section for them and a row in their scope-asymmetry tables, and lost the
+sentences that said a reply or a note could never be edited or deleted and that
+no tool removes an attached file; `knowledge-base` no longer calls its two
+structure deletes the only deletes on the server; `reports` did not change. What
+was checked is the text that was added or corrected, against the four tools'
+own descriptions — not the rest of each file.
 
 🔴 **So all four "Verified against" lines still read `4.3.0 (42 tools)`, and
 the `42` is not a typo.** That line records the build a file was last read

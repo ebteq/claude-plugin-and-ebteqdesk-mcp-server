@@ -30,10 +30,14 @@ Hierarchy:
        +- AbilityError           403  the ACCOUNT lacks an ability (required_ability)
        +- TicketNotAssignedError 403  the ticket is real, readable on the shared
        |                              escalation queue, and somebody else's
+       +- NotAgentAuthoredError  403  the reply or note to edit or delete is the
+       |                              requester's own message or a system note
        +- PermissionError_       403  refused with no scope and no ability named
        +- NotFoundError          404
        +- StaleAttachmentApiError 404 with NO `error` key on a ticket-attachment
        |                              route: the desk predates the feature
+       +- StaleThreadEntryApiError 404 with NO `error` key on a reply/note
+       |                              edit-or-delete route: same, for that feature
        +- ConflictError          409  a state conflict. Only the ticket-attachment
        |                              routes produce one, each with a `reason`
        +- PayloadTooLargeError   413  the body is over a ceiling (three endpoints,
@@ -80,6 +84,14 @@ hands a caller ids from a SHARED queue, and answering "there is no ticket with
 the id 4" for a row this same API just served is the API contradicting itself.
 Every other unreachable ticket is still a plain 404. See
 Api\\V1\\TicketWritesController.
+
+⚠️ A 403 CARRYING `reason: "not_agent_authored"` (5.3.0) IS THE SECOND ONE NO
+CREDENTIAL FIXES, AND FOR A REASON THAT IS NOT OWNERSHIP EITHER. The four
+edit-and-delete routes for a reply or a note reach the ticket exactly as their
+POST siblings do and then refuse an entry an agent did not write — the
+requester's own message, or a note the desk wrote itself. Nobody may change
+those, on any surface. No scope and no ability is named, because neither gate
+failed. See `NotAgentAuthoredError`.
 
 🔴 A 403 CARRYING `required_ability` IS A DIFFERENT ANIMAL, AND CONFLATING THE
 TWO SENDS PEOPLE TO THE WRONG PLACE. `required_scope` is about the CREDENTIAL —
@@ -135,9 +147,11 @@ __all__ = [
     "RoleScopeError",
     "AbilityError",
     "TicketNotAssignedError",
+    "NotAgentAuthoredError",
     "PermissionError_",
     "NotFoundError",
     "StaleAttachmentApiError",
+    "StaleThreadEntryApiError",
     "ConflictError",
     "PayloadTooLargeError",
     "UnsupportedMediaError",
@@ -149,9 +163,15 @@ __all__ = [
     "diagnosed_scope_error",
     "escalated_comment_error",
     "escalated_note_error",
+    "escalated_comment_edit_error",
+    "escalated_note_edit_error",
     "ESCALATION_WRITE_SCOPE",
     "MEDIA_UPLOAD_PATH",
     "NOT_ASSIGNED_REASON",
+    "NOT_AGENT_AUTHORED_REASON",
+    "THREAD_ENTRY_COMMENT",
+    "THREAD_ENTRY_NOTE",
+    "thread_entry_kind",
     "REASON_KEY_REUSED",
     "REASON_IN_PROGRESS",
     "REASON_UPLOAD_INCOMPLETE",
@@ -207,6 +227,20 @@ TICKET_WRITE_SCOPE = "ticket:write"
 #: "working" while going quietly wrong.
 NOT_ASSIGNED_REASON = "ticket_not_assigned"
 
+#: The `reason` the four reply/note EDIT-and-DELETE routes carry when the entry
+#: exists on the ticket and an agent did not write it — the requester's own
+#: message, or a note the desk wrote itself. Verbatim from
+#: `Api\V1\TicketThreadEntriesController::REASON_NOT_AGENT_AUTHORED`, and
+#: compared as a VALUE for the reason `NOT_ASSIGNED_REASON` gives.
+NOT_AGENT_AUTHORED_REASON = "not_agent_authored"
+
+#: The two kinds of thread entry the edit-and-delete routes address, as the
+#: path names them — `…/comments/{id}` is a PUBLIC reply, `…/notes/{id}` a
+#: PRIVATE note. Returned by `thread_entry_kind` so a message can say which
+#: kind of entry a 404 is about without reading the server's sentence.
+THREAD_ENTRY_COMMENT = "comment"
+THREAD_ENTRY_NOTE = "note"
+
 #: The one upload path on this API. Named because the 413 branch below is the
 #: only place in this module that has to tell TWO endpoints apart by their path
 #: rather than by a field in the body — see that branch for why the alternative
@@ -254,6 +288,40 @@ def is_ticket_attachment_path(path: str) -> bool:
     return path.startswith(_TICKET_PATH_PREFIX) and (
         path.endswith(_NOTE_ATTACHMENTS_SUFFIX) or _NOTE_UPLOADS_SEGMENT in path
     )
+
+
+def thread_entry_kind(path: str) -> str | None:
+    """`"comment"` or `"note"` for the four reply/note edit-and-delete routes
+    (5.3.0), None for every other path.
+
+        /api/v1/tickets/{id}/comments/{comment_id}   -> "comment"
+        /api/v1/tickets/{id}/notes/{note_id}         -> "note"
+
+    The third place this module tells endpoints apart by PATH, for the reason
+    the other two have: a 404 from a desk with no such route carries no field to
+    branch on. Compared SEGMENT BY SEGMENT, both ids all digits, so
+    `…/notes/attachments` and `…/notes/uploads/{id}/complete` — the attachment
+    routes under the same prefix — are never mistaken for an entry, and the
+    plain `…/comments` list and POST are not either.
+    """
+    segments = path.split("/")
+
+    # ["", "api", "v1", "tickets", "{id}", "comments"|"notes", "{entry_id}"]
+    if len(segments) != 7 or "/".join(segments[:4]) + "/" != _TICKET_PATH_PREFIX:
+        return None
+
+    ticket_id, kind, entry_id = segments[4], segments[5], segments[6]
+
+    if not (ticket_id.isdigit() and entry_id.isdigit()):
+        return None
+
+    if kind == "comments":
+        return THREAD_ENTRY_COMMENT
+
+    if kind == "notes":
+        return THREAD_ENTRY_NOTE
+
+    return None
 
 
 class EbteqdeskError(Exception):
@@ -778,6 +846,42 @@ class TicketNotAssignedError(ApiError):
     retriable = False
 
 
+class NotAgentAuthoredError(ApiError):
+    """403 `not_agent_authored` — the entry exists and an agent did not write it.
+
+    Raised only by the four reply/note edit-and-delete routes (5.3.0):
+
+        PATCH|DELETE /api/v1/tickets/{id}/comments/{comment_id}
+        PATCH|DELETE /api/v1/tickets/{id}/notes/{note_id}
+
+    The ticket was reached, its charge was paid, and the id named a real entry
+    of the right kind on it — which the REQUESTER wrote (their message arrived
+    by mail or through the portal) or the DESK wrote itself (a system note).
+    Ebteqdesk never lets anyone change either, on any surface: the requester's
+    words are the record of what was asked, a system note the record of what
+    the application did.
+
+    🔴 NO CREDENTIAL FIXES THIS, for the reason `TicketNotAssignedError` gives
+    and with one difference: here nobody at all can make the change, not even
+    the ticket's assignee. Neither `required_scope` nor `required_ability` is
+    present because neither gate failed, so nothing is diagnosed and no second
+    request is spent.
+
+    403 and not 404 because the caller can READ the entry in the thread —
+    hiding it would be the API contradicting itself. `retriable` is False.
+
+    ⚠️ AVOIDABLE, AND THE MESSAGE SAYS HOW. Every thread entry carries
+    `agent_authored`, read off the same predicate on the desk
+    (`Comment::isAgentAuthored`, `comments.user_id` set), so this refusal is
+    exactly the entries marked `false` — which also covers a reply or note by
+    an agent who has since been deleted from the desk, whose `user_id` the desk
+    nulls. A caller that checks the flag first never sees this error.
+    """
+
+    #: Nothing about the request or the credential can change the outcome.
+    retriable = False
+
+
 class PermissionError_(ApiError):
     """403 with no `required_scope` and no `required_ability` at all.
 
@@ -812,6 +916,13 @@ class NotFoundError(ApiError):
     key cannot act on that id", never "that id is free". Do not report a ticket
     as deleted on the strength of one, and do not retry: nothing about it is
     transient.
+
+    ⚠️ THE FOUR REPLY/NOTE EDIT-AND-DELETE ROUTES (5.3.0) HAVE A SECOND 404.
+    After the ticket's 404 above comes the ENTRY's — "There is no public reply
+    with the id N on this ticket" / "… private note …" — for an id that is the
+    other kind, belongs to another ticket, or is already gone. The two differ
+    only in the server's sentence, which is carried and never parsed, so the
+    message for those routes states both (see `api_error_for`).
 
     ⚠️ ONE MORE CAUSE ON `set_ticket_category` ALONE: an Ebteqdesk install
     that predates PUT /tickets/{id}/category has no such route and 404s (or
@@ -857,6 +968,31 @@ class StaleAttachmentApiError(ApiError):
 
     Nothing a caller can change fixes it: an administrator deploys the Ebteqdesk
     release that adds the routes. Never retried.
+    """
+
+    #: Nothing about the request can change the outcome.
+    retriable = False
+
+
+class StaleThreadEntryApiError(ApiError):
+    """404 with NO `error` key on a reply/note edit-or-delete route (5.3.0) —
+    this Ebteqdesk predates the release that added those four routes.
+
+    The same signal, for the same reason, as `StaleAttachmentApiError`: every
+    404 Ebteqdesk itself writes on /api/v1 carries `error`, and a route that
+    does not exist never reaches a controller to add one. On an older desk
+    `PATCH /api/v1/tickets/{id}/comments/{comment_id}` matches nothing at all,
+    so this client — which ships ahead of the desk again — would otherwise
+    report a missing ticket or a missing reply about a desk that simply has no
+    such feature.
+
+    A separate class rather than a second use of `StaleAttachmentApiError`, so a
+    caller catching that one is never told a reply edit is about attachments.
+    Also deliberately NOT a NotFoundError, so the "this may be your own ticket"
+    sentence `ticket_write_not_found` appends to a ticket-write 404 is never
+    added to it.
+
+    Nothing a caller can change fixes it. NOTHING WAS CHANGED. Never retried.
     """
 
     #: Nothing about the request can change the outcome.
@@ -1031,16 +1167,19 @@ def api_error_for(
 ) -> ApiError:
     """Turn one JSON error body into the most specific exception available.
 
-    The 403 fork is the interesting one, it is FOUR ways, and each way is
+    The 403 fork is the interesting one, it is FIVE ways, and each way is
     NARROWER than it looks.
 
       - `reason` == "ticket_not_assigned" -> not a permission failure at all.
         The credential resolved and the role was never the problem: the TICKET
-        belongs to another agent. Tested FIRST because it is the only 403 with
-        no remedy, and answering it with any of the three below sends the
+        belongs to another agent. Tested FIRST because it is a 403 with no
+        remedy, and answering it with any of the three below sends the
         caller to mint a key or find an administrator for something neither can
         fix. The server sends it with neither of the two fields below, so the
         order is unobservable today and fixed anyway.
+      - `reason` == "not_agent_authored" (5.3.0) -> the other 403 with no
+        remedy, tested right after for the same reason: the entry to edit or
+        delete is the requester's own message or a system note.
       - `required_scope` present -> a scope did not resolve. That is ALL this
         says. It does not say whether the key lacks the scope or the owner's
         role lacks the ability behind it, and the server refuses identically
@@ -1076,6 +1215,13 @@ def api_error_for(
     are recognised by the PATH instead, exactly as the KB upload's 413 already
     is: a 404 with no `error` key (the route does not exist on this desk), and a
     413 or 415 from something in front of the application.
+
+    THE REPLY/NOTE EDIT-AND-DELETE ROUTES (5.3.0) ADD A FIFTH 403 AND A PATH
+    FORK ON 404. The 403 is `reason: "not_agent_authored"`, compared as a value
+    like `ticket_not_assigned` and tested right after it, for the same reason:
+    it is a 403 no grant fixes. The 404 is recognised by `thread_entry_kind` —
+    with no `error` key it is a desk that predates the routes, with one it is
+    the ticket's 404 or the entry's, and the message states both.
     """
     server_message = payload.get("error")
     if not isinstance(server_message, str):
@@ -1098,6 +1244,7 @@ def api_error_for(
         reason = None
 
     attachment_route = is_ticket_attachment_path(path)
+    entry_kind = thread_entry_kind(path)
 
     detail = f" Ebteqdesk said: {server_message}" if server_message else ""
 
@@ -1129,6 +1276,30 @@ def api_error_for(
             "is assigned to, so it correctly handed you an id you cannot act on. "
             "Read `assignee` on the row to see whose it is. To move it forward, "
             "a human reassigns the ticket or its assignee acts on it."
+            + detail,
+            status_code=status_code,
+            path=path,
+            server_message=server_message,
+            reason=reason,
+        )
+
+    if status_code == 403 and reason == NOT_AGENT_AUTHORED_REASON:
+        return NotAgentAuthoredError(
+            "Ebteqdesk refused to change this entry because an AGENT DID NOT "
+            "WRITE IT (403). It is the requester's own message or a note the "
+            "desk wrote itself — the record of what was asked, or of what the "
+            "application did — and nobody can edit or delete either, through "
+            "this API or in the Ebteqdesk web UI. THIS IS NOT A KEY, SCOPE OR "
+            "ABILITY PROBLEM: the ticket was reached and the permissions were "
+            "enough, and nothing anyone grants changes it. NOTHING WAS CHANGED. "
+            "DO NOT RETRY, and do not try the other edit or delete tool on the "
+            "same id. Every thread entry says in advance whether this happens: "
+            "it is exactly the entries with `agent_authored: false` — the "
+            "requester's messages, system notes, and replies or notes by an "
+            "agent since removed from the desk. If you meant an agent's reply or "
+            "note, read the thread again with `get_ticket` and take the `id` of "
+            "an entry whose `agent_authored` is `true`, and check that flag "
+            "before the next edit or delete."
             + detail,
             status_code=status_code,
             path=path,
@@ -1225,6 +1396,65 @@ def api_error_for(
             "call, so repeating it cannot put the file back. To attach it "
             "afresh the call has to differ — a different note, or the file "
             "saved again so that its modification time moves."
+            + detail,
+            status_code=status_code,
+            path=path,
+            server_message=server_message,
+        )
+
+    if status_code == 404 and entry_kind is not None and "error" not in payload:
+        # 🔴 The KEY's absence again, exactly as on the attachment routes:
+        # Ebteqdesk's own 404 always has `error`. See StaleThreadEntryApiError.
+        return StaleThreadEntryApiError(
+            "This Ebteqdesk has no endpoint for editing or deleting a reply or "
+            "a note. It predates the release that added them. (It answered 404 "
+            "for the route itself, in the framework's own shape and without "
+            "the `error` sentence every refusal Ebteqdesk writes carries.) THIS "
+            "IS NOT A MISSING TICKET OR A MISSING ENTRY, so do not report "
+            "either as absent and do not try another id. NOTHING WAS CHANGED, "
+            "and nothing about the call can change that: an administrator has "
+            "to deploy the Ebteqdesk release that adds editing and deleting "
+            "replies and notes. Do not retry.",
+            status_code=status_code,
+            path=path,
+            server_message=server_message,
+        )
+
+    if status_code == 404 and entry_kind is not None:
+        # WITH the `error` key, so Ebteqdesk's own — and on these routes it has
+        # two meanings the body tells apart only in its sentence, which is
+        # carried and never parsed. Both are said, so whichever it is, the
+        # reader is not sent the wrong way.
+        if entry_kind == THREAD_ENTRY_NOTE:
+            this_kind, this_entry, other = (
+                "PRIVATE NOTE",
+                '`kind: "note"`',
+                "a public reply's id (`edit_ticket_comment` and "
+                "`delete_ticket_comment` take those)",
+            )
+        else:
+            this_kind, this_entry, other = (
+                "PUBLIC REPLY",
+                '`kind: "comment"`',
+                "a private note's id (`edit_private_note` and "
+                "`delete_private_note` take those)",
+            )
+
+        return NotFoundError(
+            f"Ebteqdesk found nothing here to change (404). NOTHING WAS "
+            f"CHANGED. Its own sentence, below, says which of two things it "
+            f"was. If it names the TICKET, this key cannot reach a ticket with "
+            f"that id for this write — it does not exist, or it is neither this "
+            f"account's own nor escalated, or it is escalated and this key "
+            f"cannot read the escalation queue; an account-wide read does not "
+            f"reach it either. Do not report the ticket as deleted. If it names "
+            f"the {this_kind}, the ticket was reached and that id is not a "
+            f"{this_kind.lower()} on it: it is {other}, an entry on a different "
+            f"ticket, or an entry that no longer exists — and if you are "
+            f"repeating a delete that timed out or failed, it means the first "
+            f"one landed. Read the thread again with `get_ticket` and take the "
+            f"`id` of the {this_entry} entry you meant. Do not retry this call "
+            f"unchanged."
             + detail,
             status_code=status_code,
             path=path,
@@ -1940,6 +2170,89 @@ def escalated_note_error(error: ScopeError) -> ScopeError:
     )
 
 
+def escalated_comment_edit_error(error: ScopeError) -> ScopeError:
+    """The narrowing for PATCH and DELETE /api/v1/tickets/{id}/comments/{comment_id}
+    (5.3.0) — editing or deleting a PUBLIC reply.
+
+    Those two routes run the POST route's own charge
+    (Concerns\\WritesApiV1TicketReplies::ticketForPublicReply on the desk): the
+    any-of floor `ticket:write|escalation:reply` on the route, then
+    `escalation:reply` charged inside `if ($escalated)`. So, exactly as for
+    `escalated_comment_error`, a refusal naming `escalation:reply` on this path
+    means one thing and can mean nothing else: the ticket is escalated.
+
+    🔴 A SEPARATE FUNCTION BECAUSE THE SENTENCE WOULD OTHERWISE BE ABOUT THE
+    WRONG ACT. `escalated_comment_error` explains why REPLYING needs the scope;
+    a user who was trying to fix a typo in an existing reply and is told about
+    replying concludes they called the wrong tool. The rule is the same and is
+    stated as the same — changing what the requester reads costs what saying it
+    costs — but the act it names is the one that was refused.
+
+    Anything that is not the `escalation:reply` refusal is returned untouched.
+    """
+    return _narrowed_escalation_error(
+        error,
+        "THIS TICKET IS ESCALATED, and editing or deleting a public reply on an "
+        "escalated ticket needs the `escalation:reply` scope INSTEAD OF "
+        "`ticket:write` — exactly what posting one costs, because changing or "
+        "removing what the requester reads is speaking to the requester. The "
+        "endpoint takes either scope, and an escalated ticket is charged the "
+        "escalation one; that is the only way it can ask for `escalation:reply`, "
+        "so this refusal tells you the ticket is escalated. "
+        "Next time you can check first: every ticket payload carries an "
+        "`escalated` boolean — read that, not the nullable `escalated_at`, and "
+        "note that it stays true after the ticket is solved or closed, until "
+        "somebody de-escalates it. "
+        "`escalation:write` is NOT a substitute — that is the internal-note half "
+        "of the same area, and it changes the NOTES on this ticket "
+        "(`edit_private_note`, `delete_private_note`), never its replies. If the "
+        "reply has to change and you cannot, ask whoever holds the escalation, "
+        "or de-escalate the ticket first. NOTHING WAS CHANGED. "
+        "Details of the `escalation:reply` refusal follow. ",
+        scope=ESCALATION_REPLY_SCOPE,
+    )
+
+
+def escalated_note_edit_error(error: ScopeError) -> ScopeError:
+    """The narrowing for PATCH and DELETE /api/v1/tickets/{id}/notes/{note_id}
+    (5.3.0) — editing or deleting a PRIVATE note.
+
+    Those two routes run the note POST's own charge
+    (Concerns\\WritesApiV1TicketNotes::ticketForPrivateNote on the desk): the
+    any-of floor `ticket:write|escalation:write`, then `escalation:write`
+    charged inside `if ($escalated)`. A refusal naming `escalation:write` on
+    this path therefore means the ticket is escalated.
+
+    The honest reason is `escalated_note_error`'s — the ticket belongs to the BP
+    queue and changing anything in its thread is a BP act — and NOT the
+    reply narrower's: nothing a note edit does reaches the requester. Separate
+    from `escalated_note_error` for the reason `escalated_comment_edit_error`
+    gives: the sentence names the act that was refused.
+
+    Anything that is not the `escalation:write` refusal is returned untouched.
+    """
+    return _narrowed_escalation_error(
+        error,
+        "THIS TICKET IS ESCALATED, and editing or deleting an internal note on "
+        "an escalated ticket needs the `escalation:write` scope INSTEAD OF "
+        "`ticket:write` — exactly what filing one costs. The endpoint takes "
+        "either scope, and an escalated ticket is charged the escalation one; "
+        "that is the only way it can ask for `escalation:write`, so this refusal "
+        "tells you the ticket is escalated. "
+        "Next time you can check first: every ticket payload carries an "
+        "`escalated` boolean — read that, not the nullable `escalated_at`, and "
+        "note that it stays true after the ticket is solved or closed, until "
+        "somebody de-escalates it. "
+        "The reason is NOT that anything would reach the requester — nothing "
+        "here does. It is that an escalated ticket belongs to the BP queue, so "
+        "changing anything in its thread is a BP act and needs the BP scope, "
+        "exactly as the Ebteqdesk browser UI requires `bp_escalation.reply` for "
+        "the same change. A key holding only `ticket:write` cannot change a note "
+        "here however many times it is re-minted with that same scope. NOTHING "
+        "WAS CHANGED. Details of the `escalation:write` refusal follow. ",
+    )
+
+
 def _narrowed_escalation_error(
     error: ScopeError,
     lead: str,
@@ -1948,7 +2261,9 @@ def _narrowed_escalation_error(
 ) -> ScopeError:
     """PREPEND `lead` to an `escalation:write` refusal, preserving everything.
 
-    The mechanism behind both public narrowers above. Nothing is masked: the
+    The mechanism behind all four public narrowers above — the two for the POST
+    routes and, since 5.3.0, the two for editing and deleting what those POSTs
+    filed. Nothing is masked: the
     original message — including the key/role diagnosis, if one was reached, and
     the server's own sentence — survives intact underneath, and the CLASS is
     preserved so a `KeyScopeError` stays a `KeyScopeError` and
@@ -1958,10 +2273,11 @@ def _narrowed_escalation_error(
     constant — never prose parsing. Anything else is returned untouched, so a
     caller can hand every ScopeError through without a guard.
 
-    🔴 $scope IS A PARAMETER BECAUSE THE TWO NARROWERS BRANCH ON DIFFERENT
-    SCOPES. A note costs `escalation:write`; a requester-facing reply costs
+    🔴 $scope IS A PARAMETER BECAUSE THE NARROWERS BRANCH ON DIFFERENT SCOPES.
+    A note — filing, editing or deleting one — costs `escalation:write`; a
+    requester-facing reply — posting, editing or deleting one — costs
     `escalation:reply`. A hardcoded constant here would print one endpoint's
-    explanation for the other's refusal, which is exactly the failure the two
+    explanation for the other's refusal, which is exactly the failure the
     separate narrowers exist to prevent one level up.
     """
     if error.required_scope != scope:

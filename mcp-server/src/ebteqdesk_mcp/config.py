@@ -114,7 +114,7 @@ class Config:
     Kept as the raw string on purpose and validated only when one of the two
     tools that read a local file runs — `upload_kb_media` or
     `attach_file_to_ticket` (`client._upload_root`). A missing or mistyped
-    directory must cost those TWO tools, not all forty-eight — validating it
+    directory must cost those TWO tools, not all fifty-two — validating it
     here would turn "the upload folder was deleted" into "the server cannot
     list tickets". None means both are turned off, which is the default.
     """

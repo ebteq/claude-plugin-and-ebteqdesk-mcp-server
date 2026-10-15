@@ -86,7 +86,9 @@ from .errors import (
     NotFoundError,
     diagnosed_ability_error,
     diagnosed_scope_error,
+    escalated_comment_edit_error,
     escalated_comment_error,
+    escalated_note_edit_error,
     escalated_note_error,
     ticket_write_not_found,
 )
@@ -723,6 +725,17 @@ class EbteqdeskClient:
         label: notes are staff-only and must never be repeated into a public
         reply, which is mailed to the requester's address.
 
+        Each entry also OPENS with `id`, and carries `agent_authored` after
+        `kind` (both additive, on a desk new enough to have the edit routes).
+        `id` is `comments.id` on a `comment` or a `note`, null on an `event` —
+        the `{comment_id}` / `{note_id}` the four edit-and-delete methods take.
+        `agent_authored` is a boolean, never null: `true` exactly on the entries
+        those methods accept, `false` on the requester's messages, system notes,
+        entries by an agent since deleted from the desk, and every event — the
+        same predicate as the desk's 403 `not_agent_authored`. It describes the
+        ROW, not the caller; the ticket's charge still applies. Both are passed
+        through like every other key.
+
         VISIBILITY IS WIDER THAN THE WRITE SURFACE'S, and the widening is
         charged for. The caller's own tickets need only `ticket:read`; a ticket
         that is somebody else's but sits on the SHARED escalation queue
@@ -770,6 +783,9 @@ class EbteqdeskClient:
 
         `per_page` is 1..20, default 20 — the same shared ceiling as the ticket
         lists, and above it is a 422 rather than a quietly smaller page.
+
+        Each entry's leading `id` is the handle the edit-and-delete methods take
+        — see `get_ticket`.
 
         Same visibility and the same two scopes as `get_ticket`.
         """
@@ -1289,10 +1305,14 @@ class EbteqdeskClient:
     #
     # All nineteen CHANGE STATE on a live helpdesk that real agents and real
     # requesters are looking at, and none of them can be undone from this API:
-    # there is no delete-ticket, no delete-comment, no delete-note, no
-    # delete-article and no delete-media endpoint. (The two structure DELETEs
-    # below are the exception that proves it — they remove a category or a
-    # folder and nothing puts one back.) Two
+    # there is no delete-ticket, no delete-article and no delete-media
+    # endpoint. (The two structure DELETEs below are the exception that proves
+    # it — they remove a category or a folder and nothing puts one back. So,
+    # since 5.3.0, are the two thread-entry DELETEs beside `add_private_note`:
+    # they remove an agent's reply or note, and its files, for good. Neither
+    # pair is an undo — a deletion is a second irreversible act, and a deleted
+    # public reply may already have been read on the requester's ticket page.)
+    # Two
     # consequences are baked into the code rather than left to the caller.
     #
     #   1. NOTHING IS RETRIED. The read half already refuses to retry (a silent
@@ -1417,6 +1437,11 @@ class EbteqdeskClient:
         ticket is still touched, and no comment row is written. A null id there
         means the reply was NOT filed — do not report it as sent.
 
+        A non-null `comment.id` is the handle `edit_ticket_comment` and
+        `delete_ticket_comment` take (5.3.0) — the same integer the thread
+        serves as the entry's `id`. Neither can unread the reply: it is on the
+        requester's ticket page from the moment it is posted.
+
         🔴 TWO SCOPES, AND THE SECOND ONE DEPENDS ON THE TICKET. Requires
         `ticket:write` always, PLUS `escalation:write` when the ticket is
         escalated. Since M2-T9 that IS checkable in advance — every ticket
@@ -1452,10 +1477,12 @@ class EbteqdeskClient:
         precisely because the comment is private, so the same fan-out still notifies the
         team, the assignee and anyone `@`-mentioned in the body.
 
-        ⚠️ IT STILL CANNOT BE EDITED OR DELETED THROUGH THIS API. There is no
-        delete-comment endpoint and no note-editing one — "internal" is not
-        "reversible". Nothing here retries, for the reason the block comment
-        above `create_ticket` gives.
+        ⚠️ "INTERNAL" IS STILL NOT "UNDOABLE". Since 5.3.0 a note can be edited
+        (`edit_private_note`, a whole-body replace) or deleted for good
+        (`delete_private_note`, which takes its files with it), by `comment.id`.
+        Neither is an undo: the notifications this call sent are not recalled.
+        Nothing here retries, for the reason the block comment above
+        `create_ticket` gives.
 
         `comment.id` is null in exactly one case, inherited from the model: a
         body that is empty in substance is discarded and no comment row is
@@ -1489,6 +1516,151 @@ class EbteqdeskClient:
             # `escalated_comment_error` — its explanation is about a reply being
             # downgraded to a note, which is false on a tool that files notes.
             on_scope_error=escalated_note_error,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Editing and deleting what the two POSTs above filed (5.3.0)
+    # ------------------------------------------------------------------ #
+    #
+    #   PATCH  /api/v1/tickets/{id}/comments/{comment_id}   edit a PUBLIC reply
+    #   DELETE /api/v1/tickets/{id}/comments/{comment_id}   delete one
+    #   PATCH  /api/v1/tickets/{id}/notes/{note_id}         edit a PRIVATE note
+    #   DELETE /api/v1/tickets/{id}/notes/{note_id}         delete one
+    #
+    # 🔴 EACH PAIR COSTS EXACTLY WHAT ITS POST SIBLING COSTS, because the desk
+    # runs the POST's own charge for it (owner decision 2026-10-15: whoever may
+    # write that kind of entry on that ticket may edit or delete ANY agent's
+    # entry of that kind there — no author check). So the reply pair has the
+    # comments route's floor and escalated charge (`escalation:reply`), the note
+    # pair the notes route's (`escalation:write`), and each reuses the narrowing
+    # of its sibling's refusal in a sentence about the act that was refused.
+    #
+    # TWO SEPARATE PAIRS ON TWO PATHS, as for the POSTs, and for the same
+    # reason: a `private` flag would make the requester-facing case reachable
+    # by forgetting a key. The path picks the kind, and the desk answers a note
+    # id on the reply route — and a reply id on the note route — with a 404.
+    #
+    # WHAT COMES BACK, passed through verbatim like everything else here:
+    #
+    #   PATCH   200 {"data": <entry>} — ONE element of
+    #           GET /api/v1/tickets/{id}/comments, re-read after the save.
+    #   DELETE  200 {"data": {"id": int, "kind": "comment"|"note",
+    #           "deleted": true}} — a receipt for a row that no longer exists.
+    #
+    # WHAT THE DESK DOES AND DOES NOT DO — App\Services\CommentEdits:
+    #
+    #   - an edit is a plain save of `body`, sanitised like a new one. It sends
+    #     NOTHING: nothing to the requester, no notification, no history
+    #     entry, no status change. A public reply has been on the requester's
+    #     ticket page since it was posted, so they may already have read the
+    #     original; they are not told it changed. (Nothing is emailed either way
+    #     — the desk sends a requester no email since Ebteqdesk PR #342, which
+    #     these routes postdate.)
+    #   - a delete is HARD: the row, its attachment rows and their files, in one
+    #     transaction. There is no trash and nothing on this API restores one.
+    #     A deleted public reply leaves the requester's ticket page without a
+    #     word to them — what they already read stays read.
+    #   - only an AGENT's entry: the requester's own message and a system note
+    #     answer 403 `not_agent_authored` (errors.NotAgentAuthoredError). The
+    #     thread marks which in advance — `agent_authored` on every entry is
+    #     the same predicate — so this client does not pre-check it: the
+    #     caller has the flag, and a second request to re-read the thread
+    #     before every write would be this client guessing at a race the desk
+    #     already answers.
+    #
+    # Nothing here retries, for the reason the block above `create_ticket`
+    # gives — and for a delete there is a second one: the repeat of a delete
+    # that landed is a 404 naming the entry, which a caller retrying blind
+    # would report as "not found" about something it just removed.
+
+    async def edit_ticket_comment(
+        self, ticket_id: int, comment_id: int, *, body: str
+    ) -> dict[str, Any]:
+        """PATCH /api/v1/tickets/{id}/comments/{comment_id} — rewrite a PUBLIC reply.
+
+        200 ``{"data": <entry>}``, the edited entry in exactly the shape
+        `get_ticket_comments` lists it, `kind: "comment"`.
+
+        `body` REPLACES the whole stored body — there is no partial edit — and
+        is validated by the create rule (`required`, non-blank): an empty one
+        is a 422 that changes nothing. Sent as `{"body": …}` and nothing else.
+
+        Sends nothing. The requester's ticket page shows the edited text from
+        now on; they are not told it changed, and may already have read the
+        original.
+
+        Costs what `comment_on_ticket` costs on the same ticket: `ticket:write`
+        + `ticket.reply` on the caller's own non-escalated ticket;
+        `escalation:read` + `escalation:reply` + `bp_escalation.reply` on any
+        escalated one. `escalated_comment_edit_error` narrows the
+        `escalation:reply` refusal.
+        """
+        return await self._request(
+            "PATCH",
+            _thread_entry_path(ticket_id, "comments", comment_id, argument="comment_id"),
+            json={"body": body},
+            on_scope_error=escalated_comment_edit_error,
+        )
+
+    async def delete_ticket_comment(self, ticket_id: int, comment_id: int) -> dict[str, Any]:
+        """DELETE /api/v1/tickets/{id}/comments/{comment_id} — remove a PUBLIC reply.
+
+        200 ``{"data": {"id": int, "kind": "comment", "deleted": true}}``.
+
+        🔴 PERMANENT, AND IT TAKES THE REPLY'S ATTACHMENTS WITH IT. The row and
+        every file on it are deleted; nothing on this API restores them. It
+        leaves the requester's ticket page without a word to them, and what
+        they already read there stays read.
+
+        No body is sent: a bodyless DELETE, as `de_escalate_ticket` sends.
+        Same scopes and narrowing as `edit_ticket_comment`.
+        """
+        return await self._request(
+            "DELETE",
+            _thread_entry_path(ticket_id, "comments", comment_id, argument="comment_id"),
+            on_scope_error=escalated_comment_edit_error,
+        )
+
+    async def edit_private_note(
+        self, ticket_id: int, note_id: int, *, body: str
+    ) -> dict[str, Any]:
+        """PATCH /api/v1/tickets/{id}/notes/{note_id} — rewrite a PRIVATE note.
+
+        200 ``{"data": <entry>}``, the edited entry in exactly the shape
+        `get_ticket_comments` lists it, `kind: "note"`.
+
+        `body` REPLACES the whole stored body, under the create rule; an empty
+        one is a 422 that changes nothing. Sends nothing — no notification, no
+        `@`-mention, no history entry.
+
+        Costs what `add_private_note` costs on the same ticket: `ticket:write`
+        + `ticket.reply` on the caller's own non-escalated ticket;
+        `escalation:read` + `escalation:write` + `bp_escalation.reply` on any
+        escalated one. Never the account-wide read lift. `escalated_note_edit_error`
+        narrows the `escalation:write` refusal.
+        """
+        return await self._request(
+            "PATCH",
+            _thread_entry_path(ticket_id, "notes", note_id, argument="note_id"),
+            json={"body": body},
+            on_scope_error=escalated_note_edit_error,
+        )
+
+    async def delete_private_note(self, ticket_id: int, note_id: int) -> dict[str, Any]:
+        """DELETE /api/v1/tickets/{id}/notes/{note_id} — remove a PRIVATE note.
+
+        200 ``{"data": {"id": int, "kind": "note", "deleted": true}}``.
+
+        🔴 PERMANENT, AND IT TAKES THE NOTE'S ATTACHMENTS WITH IT — including a
+        file `attach_file_to_ticket` filed on that note. Nothing on this API
+        restores either.
+
+        No body is sent. Same scopes and narrowing as `edit_private_note`.
+        """
+        return await self._request(
+            "DELETE",
+            _thread_entry_path(ticket_id, "notes", note_id, argument="note_id"),
+            on_scope_error=escalated_note_edit_error,
         )
 
     async def escalate_ticket(self, ticket_id: int) -> dict[str, Any]:
@@ -5106,6 +5278,53 @@ def _attachment_id(value: Any) -> int:
         )
 
     return value
+
+
+def _thread_entry_id(value: Any, *, argument: str) -> int:
+    """A positive integer reply or note id, or a ValueError naming the argument.
+
+    Its own function rather than `_ticket_id`'s, for the reason `_attachment_id`
+    is: the useful half of the message is where the id COMES FROM, and a reply's
+    or a note's id comes from the thread, not from a ticket list. ⚠️ And it has
+    to be refused HERE for a reason the other two do not have: the routes carry
+    `whereNumber`, so a word builds a URL that matches no route, and a no-route
+    404 on these paths is exactly what `StaleThreadEntryApiError` reads as "this
+    desk predates the feature" — the right answer to the wrong question.
+
+    A bool is rejected explicitly: `True` is an `int` in Python and would
+    silently address entry 1.
+    """
+    kind = "reply" if argument == "comment_id" else "note"
+    wanted = '`kind: "comment"`' if argument == "comment_id" else '`kind: "note"`'
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(
+            f"{argument} must be a positive integer {kind} id such as 812, not "
+            f"{value!r}. It is the `id` of a {wanted} entry in `get_ticket`'s "
+            f"`conversation` (or `get_ticket_comments`), or the `comment.id` the "
+            f"post that filed it returned; there is no lookup by text or author."
+        )
+
+    if value <= 0:
+        raise ValueError(
+            f"{argument} must be a positive integer {kind} id such as 812, not "
+            f"{value!r}."
+        )
+
+    return value
+
+
+def _thread_entry_path(ticket_id: Any, kind: str, entry_id: Any, *, argument: str) -> str:
+    """`/api/v1/tickets/{id}/{comments|notes}/{entry_id}`, both ids checked first.
+
+    `kind` is the PATH segment and is passed by the four methods as a literal,
+    never by a caller: the path is the whole difference between a public reply
+    and a private note, and the desk addresses each kind on its own route.
+    """
+    return (
+        f"/api/v1/tickets/{_ticket_id(ticket_id)}/{kind}/"
+        f"{_thread_entry_id(entry_id, argument=argument)}"
+    )
 
 
 def _kb_structure_id(value: Any, *, argument: str, what: str) -> int:

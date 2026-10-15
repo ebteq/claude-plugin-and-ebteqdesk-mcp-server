@@ -540,8 +540,10 @@ async def test_the_server_refuses_both_causes_identically() -> None:
 # --------------------------------------------------------------------------- #
 #
 # 🔴 THESE TESTS CREATE REAL DATA AND CANNOT CLEAN UP AFTER THEMSELVES. There is
-# no delete-ticket and no delete-comment endpoint on /api/v1, so every run
-# leaves a ticket behind. That is why they are gated on a THIRD variable rather
+# no delete-ticket endpoint on /api/v1, so every run leaves a ticket behind.
+# (Since 5.3.0 a reply or a note CAN be deleted — but a deleted reply may
+# already have been read on the requester's ticket page, so it cleans up
+# nothing that matters.) That is why they are gated on a THIRD variable rather
 # than riding along with `-m integration`: someone pointing the integration
 # suite at staging to check a read contract must not silently file tickets there
 # and email a requester's contact address.
@@ -659,6 +661,46 @@ async def test_commenting_returns_a_receipt_and_no_comment_body(
     # cannot leak through this path. Nothing may add a body here.
     assert "body" not in result["comment"]
     assert "comments" not in result["data"]
+
+
+@writes
+async def test_a_note_can_be_found_in_the_thread_edited_and_deleted(
+    client, created_ticket
+) -> None:
+    """5.3.0, against a real desk: the thread serves the `id` the edit and
+    delete routes take, an edit replaces the body and answers with the entry,
+    and a delete leaves a receipt and a thread without the note.
+
+    A PRIVATE NOTE and not a public reply, deliberately: a reply is on the
+    requester's ticket page the moment it is posted, and deleting it afterwards
+    cannot unread it — the very fact this test must not demonstrate on
+    somebody's ticket. A note is never shown to them. Needs a desk with the
+    routes; an older one raises
+    `StaleThreadEntryApiError` here, which is the right failure."""
+    ticket_id = created_ticket["id"]
+    filed = await client.add_private_note(ticket_id, body="Integration note, original.")
+    note_id = filed["comment"]["id"]
+
+    thread = await client.get_ticket_comments(ticket_id)
+    served = next(entry for entry in thread["data"] if entry.get("id") == note_id)
+    assert served["kind"] == "note"
+    # The flag the four tools tell a model to check: this token's own note.
+    assert served["agent_authored"] is True
+
+    edited = await client.edit_private_note(ticket_id, note_id, body="Integration note, edited.")
+    assert edited["data"]["id"] == note_id
+    assert edited["data"]["kind"] == "note"
+    assert edited["data"]["body"] == "Integration note, edited."
+
+    # The other kind's route does not know the id.
+    with pytest.raises(NotFoundError):
+        await client.delete_ticket_comment(ticket_id, note_id)
+
+    deleted = await client.delete_private_note(ticket_id, note_id)
+    assert deleted == {"data": {"id": note_id, "kind": "note", "deleted": True}}
+
+    after = await client.get_ticket_comments(ticket_id)
+    assert note_id not in {entry.get("id") for entry in after["data"]}
 
 
 @writes

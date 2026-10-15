@@ -507,7 +507,9 @@ structural decisions for a human in the Ebteqdesk UI.
 ### 🔴 The deletes are a REFUSAL, never a cascade
 
 `delete_kb_category` and `delete_kb_folder` are the **only** tools on this server
-that remove anything, and nothing on this API puts a removed row back. No trash,
+that remove anything from the knowledge base (the only other deletes,
+`delete_ticket_comment` and `delete_private_note`, act on ticket threads), and
+nothing on this API puts a removed row back. No trash,
 no restore, no version history — the response is the only record of what it was.
 
 - A category still holding folders → **422 naming the count**: *"This category

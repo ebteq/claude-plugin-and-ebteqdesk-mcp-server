@@ -1,6 +1,6 @@
 ---
 name: tickets
-description: Work Ebteqdesk support tickets — list or search the queue, open a ticket and read its full conversation, look at an attached screenshot, attach a file from the user's machine to a ticket, draft and send a reply to the customer, file an internal note, move a ticket between working states or reopen a resolved one, change or clear a ticket's type (category), open a new ticket, and close one. Use whenever the user asks about their tickets, the ticket queue, the status of a ticket or what is happening on one, a ticket number or reference, replying to a customer, putting a ticket on hold or waiting on the customer, reopening a ticket, recategorising a ticket or changing its type, or resolving/closing one.
+description: Work Ebteqdesk support tickets — list or search the queue, open a ticket and read its full conversation, look at an attached screenshot, attach a file from the user's machine to a ticket, draft and send a reply to the customer, file an internal note, fix or permanently delete a reply or a note already posted, move a ticket between working states or reopen a resolved one, change or clear a ticket's type (category), open a new ticket, and close one. Use whenever the user asks about their tickets, the ticket queue, the status of a ticket or what is happening on one, a ticket number or reference, replying to a customer, correcting a typo in a reply or note, removing a note posted on the wrong ticket, putting a ticket on hold or waiting on the customer, reopening a ticket, recategorising a ticket or changing its type, or resolving/closing one.
 ---
 
 # Ebteqdesk tickets
@@ -36,17 +36,19 @@ A `401` means the key is wrong, revoked or expired. A `403` means the key is
 fine but lacks the scope that tool needs — and scopes are fixed when a key is
 created, so the fix is a new key, never an edit to the current one.
 
-## 🔴 The three irreversible things
+## 🔴 The irreversible things
 
-Nothing on this API can delete or edit a ticket, a comment, or a note. There is
-no undo, no dry run, and no preview. Before any of these, show the user exactly
-what you intend to send and get their agreement:
+Nothing on this API can delete or edit a ticket, and **nothing can make a
+customer unread what they already saw**. There is no undo, no dry run, and no preview. Before any of these,
+show the user exactly what you intend to send — or remove — and get their
+agreement:
 
 | Tool | What it really does |
 |---|---|
-| `comment_on_ticket` | Posts a **public** reply. The customer gets it **by email**. There is no flag to make it private. |
+| `comment_on_ticket` | Posts a **public** reply. The customer gets it **by email**. There is no flag to make it private, and it is on the customer's ticket page the moment it is posted — **editing or deleting it afterwards cannot unread it**. |
 | `create_ticket` | Files a real ticket on the live queue, assigned to your account, and may create a customer contact record as a side effect. |
 | `close_ticket` with `status=4` | Resolves the ticket **and emails the customer a satisfaction survey**. |
+| `delete_ticket_comment` / `delete_private_note` | **Permanently** deletes a reply or a note **and every file on it**. No trash, no restore. See "Changing a reply or a note afterwards". |
 
 **Never retry a write that appears to have timed out.** A call that looks failed
 may well have landed, and a retry sends a second email or files a second ticket.
@@ -62,6 +64,10 @@ is the part that goes wrong, not the individual calls.
 |---|---|---|
 | Answer the customer | `comment_on_ticket(id, body)` | **Yes, always.** That is what it is for. |
 | Record something internal | `add_private_note(id, body)` | No |
+| Fix a typo in a reply already sent | `edit_ticket_comment(id, comment_id, body)` — the **whole** corrected text | No — the fix shows on their ticket page, but they are **not told**, and may already have read the original |
+| Fix or update an internal note | `edit_private_note(id, note_id, body)` — the **whole** new text | No |
+| Remove a note filed on the wrong ticket | `delete_private_note(id, note_id)` — **permanent**, takes its files too | No |
+| Remove a public reply | `delete_ticket_comment(id, comment_id)` — **permanent** | No — it leaves their ticket page **without a word to them**; what they already read stays read |
 | Put a file on the ticket, internally | `attach_file_to_ticket(id, file_path, note)` | No — and the customer cannot see the file |
 | Park it on somebody internal | `set_ticket_status(id, 3)` — pending | No |
 | Park it on the customer | `set_ticket_status(id, 8)` — waiting on customer | No |
@@ -169,6 +175,8 @@ state do not:
 | `comment_on_ticket` | `ticket:write` + `ticket.reply` | **`escalation:write` + `escalation:read`** (and the `bp_escalation.reply` ability) |
 | `add_private_note` | `ticket:write` + `ticket.reply` | **`escalation:write` + `escalation:read`** (and the `bp_escalation.reply` ability) |
 | `attach_file_to_ticket` | `ticket:write` + `ticket.reply` | **`escalation:write` + `escalation:read`** (and the `bp_escalation.reply` ability) — it files a note, so it costs what a note costs |
+| `edit_ticket_comment` / `delete_ticket_comment` | `ticket:write` + `ticket.reply` | **`escalation:reply` + `escalation:read`** (and the `bp_escalation.reply` ability) — changing what the customer reads costs what Ebteqdesk charges for saying it; `escalation:write` is not enough |
+| `edit_private_note` / `delete_private_note` | `ticket:write` + `ticket.reply` | **`escalation:write` + `escalation:read`** (and the `bp_escalation.reply` ability) — what a note costs |
 | `close_ticket` | `ticket:write` + `ticket.close` | **identical — no escalation branch at all** |
 | `set_ticket_status` | `ticket:write` + `ticket.reply` | **identical — no escalation branch at all** |
 | `set_ticket_category` | `ticket:write` + `ticket.reply` | **identical — no escalation branch at all** |
@@ -257,6 +265,12 @@ no way to list a single *other* agent's tickets.
 - **`note`** — a **private internal note**. Staff only.
 - **`event`** — a history entry, e.g. "Escalated", "Status updated".
 
+Every entry also starts with an **`id`** — the handle for editing or deleting a
+`comment` or a `note` afterwards (`null` on an `event`) — and carries
+**`agent_authored`**: `true` on a reply or note an agent wrote, `false` on the
+customer's messages, system notes and events. Only `true` entries can be edited
+or deleted. See "Changing a reply or a note afterwards".
+
 Two things people get wrong:
 
 - The customer's **opening message is `data.body`**, not the first entry of
@@ -344,7 +358,9 @@ copy it in and give you the new path, not trying another location.
 - **One call is one file on one note**, and every note notifies the team and
   the assignee. Five files are five notifications — say so before attaching a
   batch.
-- **Not reversible.** No tool removes an attachment or a note.
+- **Removable only with its whole note.** No tool removes the file alone;
+  `delete_private_note` on the note's `comment.id` deletes the note **and**
+  every file on it, permanently. The team's notifications are not recalled.
 - `note` is optional. Without it the note reads `Attached file: <name>`.
 
 🔴 **A large video does not finish in one call.** If the result has a
@@ -384,8 +400,10 @@ Decide which of the two you want **before** you draft:
   would not want a customer to read.
 
 Reaching for `comment_on_ticket` when you meant a note is how an internal remark
-gets mailed to a customer. Notes are also permanent — there is no note-editing
-or note-deleting tool anywhere on this API.
+gets mailed to a customer — and no later edit or delete unreads it, because a
+reply is on the customer's ticket page the moment it is posted. A note can be
+fixed or removed afterwards (see below) and is never shown to the customer; a
+reply can be changed afterwards, but the customer may already have read it.
 
 🔴 **The response's `comment.id` can be `null`, and that means nothing was
 filed.** Ebteqdesk silently discards a public reply identical to the author's
@@ -409,6 +427,83 @@ or private — needs `escalation:write` **and** `escalation:read` on top of
 `close_ticket` and `set_ticket_status` need nothing extra at all. See the
 asymmetry table above. The escalation queue also has its own conventions; use
 the `escalations` skill for those tickets.
+
+## Changing a reply or a note afterwards
+
+Four tools, one pair per kind of entry, matching the `kind` you read in the
+thread:
+
+| Entry `kind` | Fix its text | Remove it |
+|---|---|---|
+| `comment` (public reply) | `edit_ticket_comment(ticket_id, comment_id, body)` | `delete_ticket_comment(ticket_id, comment_id)` |
+| `note` (internal) | `edit_private_note(ticket_id, note_id, body)` | `delete_private_note(ticket_id, note_id)` |
+
+Typical asks: *"fix the typo in my last reply"*, *"update that note with the
+RMA number"*, *"I put that note on the wrong ticket — remove it"*.
+
+🔴 **None of these is an undo, and with a public reply that is the thing to say
+out loud.** The reply has been on the **customer's ticket page** since it was
+posted, so they may already have read the original. (Internal notes are never
+shown there.)
+
+- `edit_ticket_comment` changes what the ticket and the customer's page show
+  from now on. **Nothing is sent** — the customer is not told it changed.
+- `delete_ticket_comment` takes the reply off the ticket and the page,
+  **without a word to the customer** — what they already read stays read.
+  Never tell the user a reply was "taken back", "retracted" or "unsent".
+- If the customer needs to know something was wrong — a wrong price, date or
+  name — that is a **new** reply with `comment_on_ticket`, drafted and agreed
+  like any other, not a quiet edit.
+
+🔴 **An edit replaces the WHOLE text.** There is no partial edit and no append.
+To fix a typo: read the entry's current `body` from `get_ticket` (the text is
+inside `body.untrusted_content`), correct it, and send **all** of it back. Show
+the user the complete new text before you send it. Plain text keeps its line
+breaks; HTML is cut down to the desk's allowed tags; Markdown is **not**
+rendered. The entry keeps its original author and time, and nothing marks it as
+edited — so editing a colleague's entry puts your words under their name.
+
+🔴 **A delete is permanent and takes the entry's files with it.** No trash, no
+restore. Name the entry you are about to delete — its author, time and text,
+and any file names — and get the user's agreement first. If the entry only
+needs fixing, edit it instead. Deleting a note is also the **only** way a file
+`attach_file_to_ticket` filed comes off a ticket.
+
+**Finding the id.** Read the thread with `get_ticket` and take the `id` of the
+entry the user means — one with `agent_authored: true` — or use the `comment.id` that `comment_on_ticket`,
+`add_private_note` or `attach_file_to_ticket` returned. **Never guess an id.**
+A note's id on a reply tool, a reply's id on a note tool, or another ticket's
+entry comes back **404** — re-read the thread, check `kind`, and use the
+matching tool.
+
+🔴 **Check `agent_authored` before you call — only `true` can be changed.**
+Every thread entry carries it. `false` marks the customer's own messages (they
+are `kind: "comment"` too and carry an `id`), notes the system wrote, and
+entries by an agent who has since been removed from the desk. All of those are
+refused with a 403 `not_agent_authored` that **no key or permission fixes** — so
+if the user asks you to change one, tell them it cannot be changed instead of
+calling the tool. `true` means the **entry** can be changed, not that your key
+may: the scopes below still apply.
+
+⚠️ **Any agent's entry, not only yours.** These reach **every agent's** reply or
+note on a ticket you may write to. Change a colleague's words only when the
+user asked for that specific entry.
+
+They cost what posting that kind of entry costs — see the asymmetry table above:
+the reply pair needs `escalation:reply` on an escalated ticket, the note pair
+`escalation:write`. A refusal naming either means the ticket is escalated.
+
+The edit tools answer with the edited entry (text wrapped as
+`{"untrusted_content": "…"}`); the delete tools with
+`{"data": {"id": …, "kind": …, "deleted": true}}`. **Never retry one that timed
+out** — read the thread instead. A repeated delete of an entry that is already
+gone answers a 404 naming it: that means it was deleted, not that it never
+existed.
+
+⚠️ **These arrived in `ebteqdesk-mcp` 5.3.0 and need an Ebteqdesk new enough to
+have the routes.** Against an older desk they answer "This Ebteqdesk has no
+endpoint for editing or deleting a reply or a note" — the desk's version, not a
+missing ticket or entry.
 
 ## Closing
 
