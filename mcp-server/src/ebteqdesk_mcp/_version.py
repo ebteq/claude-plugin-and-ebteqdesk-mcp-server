@@ -831,4 +831,63 @@ __all__ = ["__version__"]
 #:
 #: ⚠️ THE PLUGIN'S SKILLS GAINED THE TOOLS, AND THEIR "VERIFIED AGAINST" LINES
 #: WERE NOT MOVED — the same call 5.0.0 and 5.2.0 made, for the same reason.
-__version__ = "5.3.0"
+#:
+#: 6.0.0 — WARNI ACTIVITY SPEAKS ENGAGEMENT STATUS, NOT A 0–5 SCORE. A MAJOR
+#: on the ordinary reading of the rule at the top of this file, not the 4.0.0
+#: stretch: arguments a caller can observe moved, and so did the response keys
+#: a caller branches on. No tool was added and none was removed. Still
+#: fifty-two tools, twenty-five reads and twenty-seven writes; `close_ticket`
+#: still defaults to 5. The write half is untouched.
+#:
+#: WHAT MOVED, on the four tools added at 5.1.0 and on nothing else:
+#:
+#:   - `activity_list`'s `tier` argument is now `status` (the same three
+#:     values: active, exploring, dormant). `min_score` and `max_score` are
+#:     gone; `min_rate` and `max_rate` bound the engaged-day rate as a
+#:     percentage, 0..100 inclusive. `sort` is `rate_desc` | `rate_asc` |
+#:     `name`. `score_desc` and `score_asc` are not accepted.
+#:   - A list row no longer carries `score`, `tier`, `points` or
+#:     `days_present`. It carries `status`, `rate` (0..1), `rate_percent`
+#:     (0..100), `engaged_days`, `counted_days`, `signed_up_on` and `signals`.
+#:   - `activity_summary`'s `data` no longer carries `customers`,
+#:     `average_score`, `tiers`, `modules` or `average_points`. It carries
+#:     `merchants`, `without_status`, `average_rate`, `statuses` and `signals`.
+#:     An empty result is `merchants: 0` with an empty `reported_dates`.
+#:   - `activity_list_dormant` lists businesses with NO engaged day across the
+#:     last N reported dates, not "daily score <= 1". The streak is
+#:     `{date, engaged, present, counted}` and `latest` no longer carries
+#:     `points`, `score` or `tier`.
+#:   - `activity_get_customer`'s day rows no longer carry `points`, `score` or
+#:     `tier`. They carry `reported`, `modules_used`, `engaged`, `status` and
+#:     `counted`. A single stored day is never `exploring`.
+#:   - `date` on a list or a summary is the FIRST day of the period. The
+#:     period length comes from `meta.rules.periods`, counted forward from
+#:     that day — not an ISO week and not a calendar month.
+#:   - All four `activity_*` read routes accept EITHER `activity:read`
+#:     ("Warni Activity → read") OR `reports:read` ("Reports & Analytics") on
+#:     the API key (`apiScope:activity:read|reports:read`), both backed by
+#:     `reports.view` alone — unlike `get_reports_summary`, which still
+#:     requires `reports:read` plus `admin.access` + `reports.view`, so
+#:     Administrator, Supervisor, Agent, and Agent (Reports) can all call
+#:     `activity_*` with either scope.
+#:
+#: A caller written against 5.3.0 that passes `tier`, `min_score` or
+#: `sort="score_desc"` does not reach the desk: this client refuses the
+#: arguments, and the live API 422s the old query names anyway. That is a
+#: break, which is what the major announces. `serverInfo.version` staying at
+#: 5.3.0 would tell a host the old arguments still work.
+#:
+#: 🔴 THE THRESHOLDS ARE NOT IN THIS PACKAGE. Every activity response carries
+#: `meta.rules` (thresholds, which signals exist, which are unavailable, which
+#: drive the status, the period lengths, the timezone). Copying 60 and 10
+#: into a constant here would be a second owner of App\Activity\ActivityRules,
+#: and the descriptions say to read the response instead of memorizing a
+#: number.
+#:
+#: ⚠️ THE `reports` SKILL'S WARNI ACTIVITY SECTION WAS REWRITTEN AGAINST THESE
+#: FOUR TOOLS, and its "Verified against" line moved to 6.0.0 (52 tools)
+#: because that section was. The ticket-report and escalation-report halves of
+#: the same file were not re-read in this release. The other three skills were
+#: not re-read either, and their lines stay where they were: `tickets` at
+#: 4.4.0, `knowledge-base` and `escalations` at 4.3.0.
+__version__ = "6.0.0"

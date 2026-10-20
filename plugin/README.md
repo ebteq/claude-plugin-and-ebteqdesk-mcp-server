@@ -7,16 +7,17 @@ Four Claude Code skills for working an Ebteqdesk helpdesk through its MCP server
 | `ebteqdesk:tickets` | List and read tickets (own queue, or the whole account with `scope="all"`), the full conversation, attachments, attach a local file on an internal note, reply, internal notes, edit or permanently delete a reply or a note, move a ticket between working states or reopen one, change or clear a ticket's type, open a ticket, close one |
 | `ebteqdesk:escalations` | The shared escalation queue, reading and replying on escalated tickets, editing or deleting a reply or note on one, escalate, de-escalate, close |
 | `ebteqdesk:knowledge-base` | Search and read articles (including per-language versions), the category/folder tree across Ebteqdesk's two knowledge bases (Salon V3 and Warni), propose and update articles, check a review verdict or the proposal queue, upload and embed screenshots, create/delete categories and folders, reorder |
-| `ebteqdesk:reports` | The account-wide ticket report, the per-category escalation report, and the Warni POS activity score (summary first, then the dormant-customer review) |
+| `ebteqdesk:reports` | The account-wide ticket report, the per-category escalation report, and the Warni POS engagement status (rate and status) and the dormant review |
 
 **Each `SKILL.md` carries its own "Verified against `ebteqdesk-mcp`" line.**
 If the server you are connected to reports a different version in
 `serverInfo.version`, treat that skill as possibly stale.
 
-✅ **All four skills have now been fully re-read against `4.3.0` (42 tools).
-Two lines say so; `reports` says `5.1.0` (47 tools), because 5.1.0 added the
-four Warni Activity reads and only that skill covers them. The 5.1.0 change touches
-none of the other skills.** The first pass (`knowledge-base` only) left the
+✅ **All four skills were fully re-read against `4.3.0` (42 tools).** The four
+lines as they stand: `tickets` `4.4.0` (43 tools), `knowledge-base` `4.3.0`
+(42 tools), `escalations` `4.3.0` (42 tools), `reports` `6.0.0` (52 tools).
+`reports` says `6.0.0` because its activity section was rewritten against that
+release; the other three were not re-read and were not bumped. The first pass (`knowledge-base` only) left the
 other three at `1.6.0` on a spot check that only compared tool *signatures* —
 which is exactly the check this project's own retrospective on that pass
 warned was not enough, since neither of the two worst items the KB pass found
@@ -29,8 +30,8 @@ wrong rather than merely incomplete — see
 [Keeping these skills true](#keeping-these-skills-true) for the itemised list.
 
 ✅ **`ebteqdesk:tickets` has since been re-read against `4.4.0` (43 tools)**,
-the release that adds `set_ticket_category`, and its line says so. The other
-three still say `4.3.0`, correctly: the only thing 4.4.0 changed that they
+the release that adds `set_ticket_category`, and its line says so. That release
+left the other three at `4.3.0`: the only thing 4.4.0 changed that they
 mention is the count of retry-safe writes (two → three), and that sentence was
 corrected in `escalations` and `knowledge-base` in the same pull request without
 moving their lines, since neither was re-read in full.
@@ -238,12 +239,12 @@ structure deletes the only deletes on the server; `reports` did not change. What
 was checked is the text that was added or corrected, against the four tools'
 own descriptions — not the rest of each file.
 
-🔴 **So all four "Verified against" lines still read `4.3.0 (42 tools)`, and
-the `42` is not a typo.** That line records the build a file was last read
-against, and the count in it is that build's. Moving it to `5.1.0 (43 tools)`
-on the strength of one added section would be exactly the bookkeeping bump the
-rule above forbids. Until the description-level re-read happens, the mismatch
-with `serverInfo.version` is the signal working as intended.
+The four "Verified against" lines as they stand: `tickets` `4.4.0` (43 tools),
+`knowledge-base` `4.3.0` (42 tools), `escalations` `4.3.0` (42 tools), `reports`
+`6.0.0` (52 tools). `reports` says `6.0.0` because its activity section was
+rewritten against that release. The other three were not re-read and were not
+bumped. A line still records the build a file was last read against; it does
+not move as bookkeeping.
 
 ## Agent provisioning: nine tools, no skill
 
