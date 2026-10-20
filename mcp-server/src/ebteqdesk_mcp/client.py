@@ -219,14 +219,20 @@ for _name in _HTTP_LOGGER_NAMES:
     logging.getLogger(_name).addFilter(_UPLOAD_ADDRESS_LOG_FILTER)
 
 #: The Warni Activity vocabulary, copied from App\Reporting\ActivityReport
-#: (`PERIODS`, `SORTS`), App\Reporting\ActivityTiers (`TIERS`, `MAX_SCORE`)
-#: and App\Activity\ActivityInput (the numeric limits). These are CODE
-#: constants on the server and the same for every caller, which is what makes
-#: a local copy safe — see the block comment above `activity_list`.
+#: (`PERIODS`, `SORTS`), App\Reporting\ActivityTiers (`STATUSES`) and
+#: App\Activity\ActivityInput (the numeric limits on a rate filter, a page
+#: and a dormant window). These are CODE constants on the server and the same
+#: for every caller, which is what makes a local copy safe — see the block
+#: comment above `activity_list`.
+#:
+#: 🔴 NOT COPIED: the status thresholds, the signal list and the period
+#: lengths. App\Activity\ActivityRules says every client reads those from
+#: `meta.rules` on the response. A number pinned here would be a second copy
+#: that goes stale the day the desk changes one.
 ACTIVITY_PERIODS: tuple[str, ...] = ("day", "week", "month")
-ACTIVITY_TIERS: tuple[str, ...] = ("active", "exploring", "dormant")
-ACTIVITY_SORTS: tuple[str, ...] = ("score_desc", "score_asc", "name")
-ACTIVITY_MAX_SCORE = 5
+ACTIVITY_STATUSES: tuple[str, ...] = ("active", "exploring", "dormant")
+ACTIVITY_SORTS: tuple[str, ...] = ("rate_desc", "rate_asc", "name")
+ACTIVITY_MAX_RATE = 100
 ACTIVITY_MAX_PER_PAGE = 100
 ACTIVITY_QUERY_MAX = 100
 ACTIVITY_DORMANT_DEFAULT_DAYS = 3
@@ -878,9 +884,11 @@ class EbteqdeskClient:
         (backed by `reports.view`) AND the `admin.access` ability, checked by
         the controller. That second check is genuinely reachable, unlike its
         neighbours': five of the seven numbers here are admin-only cells on the
-        web page, and roles such as Supervisor hold `reports.view` without
-        `admin.access`. So a key whose `reports:read` resolves perfectly can
-        still be refused, with a body naming `admin.access` — an
+        web page, and roles such as Supervisor, Agent and Agent (Reports) hold
+        `reports.view` without `admin.access`. So a key whose `reports:read`
+        resolves perfectly (and can call the four `activity_*` methods, which
+        accept `activity:read` or `reports:read` and need only `reports.view`)
+        can still be refused here, with a body naming `admin.access` — an
         `AbilityError`, whose remedy is an administrator and never a new key.
         """
         params: dict[str, str] = {}
@@ -3761,10 +3769,14 @@ class EbteqdeskClient:
     # WARNI ACTIVITY — how much of the POS each business uses
     # ------------------------------------------------------------------ #
     #
-    # Four READS over `/api/v1/activity*`, all on the `activity:read` scope,
-    # which is backed by the `reports.view` ability — the same gate as the
-    # /reports/activity web page, so the API and the page admit the same
-    # people. A legacy `*` key covers it.
+    # Four READS over `/api/v1/activity*`, all gated by
+    # `apiScope:activity:read|reports:read`: they accept EITHER the
+    # `activity:read` scope ("Warni Activity → read") OR the `reports:read`
+    # scope ("Reports & Analytics") on the API key, and both scopes are backed
+    # by the `reports.view` ability — the same gate as the /reports/activity web
+    # page, with no `admin.access` check (unlike `get_reports_summary`), so
+    # Administrator, Supervisor, Agent and Agent (Reports) can all call them
+    # with either scope. A legacy `*` key also covers them.
     #
     # 🔴 THE FIFTH ROUTE IS DELIBERATELY NOT HERE. `POST /api/v1/activity/daily`
     # is the OLD machine push: it OVERWRITES a whole day of activity for every
@@ -3784,29 +3796,33 @@ class EbteqdeskClient:
     # legal is server config, so only the shape is checked here and a wrong
     # code is the server's 422.
     #
-    # THE SCORE, stated once so every docstring below can refer to it:
+    # THE STATUS, stated once so every docstring below can refer to it. The
+    # numbers are NOT stated: they travel in `meta.rules`
+    # (App\Activity\ActivityRules) and a client that copied them would be a
+    # second owner of a rule the desk already publishes.
     #
-    #   - Five modules: `checkout`, `appointment`, `member`, `catalog`,
-    #     `expense`. On one day a module scores 1 point if it was used at all
-    #     (count > 0) and 0 otherwise, so a DAILY score is an integer 0..5.
-    #   - Over a week (ISO Mon–Sun) or a calendar month, `points[module]` is
-    #     DAYS USED ÷ DAYS REPORTED (0..1, 2dp) — a share of days, NOT a count
-    #     and NOT a percentage — and `score` is the AVERAGE DAILY SCORE (0..5,
-    #     1dp).
-    #   - Only REPORTED dates count (a date the POS pushed for the plan). A
-    #     business missing on a reported date scores 0 for that day.
-    #   - Tier comes from the ROUNDED score: >= 4 `active`, >= 2 `exploring`,
-    #     otherwise `dormant`.
+    #   - A day is engaged when a primary signal that is actually stored was
+    #     used. Login is primary but has no data source yet, so today that is
+    #     checkout, appointment or member. Catalog and expense are reported
+    #     and never make a day engaged.
+    #   - Over a period, rate = engaged days / counted days, and the status
+    #     (active | exploring | dormant) comes from that rate. A single stored
+    #     day is never `exploring`; exploring exists only on a period.
+    #   - Counted days skip days before `signed_up_on` and skip the in-progress
+    #     day (today, Malaysia time) until the business is engaged on it.
     #
     # VALIDATION. Unlike the ticket lists, these methods DO refuse bad enums and
     # out-of-range numbers locally. The server's vocabulary here is small,
-    # fixed in code (App\Reporting\ActivityTiers / ActivityReport) rather than
-    # in the database, and identical for every role, so a local copy cannot go
-    # stale per caller the way a role-dependent rule would; and a model reaching
-    # for `tier="inactive"` or `days=365` is better told the legal set before a
-    # round trip than handed a 422. `plan` is the exception: its legal values
-    # are a SERVER CONFIG list (`activity.plans`, today "all" and "free"), so
-    # it is passed through and a wrong one comes back as the server's 422.
+    # fixed in code (App\Reporting\ActivityTiers / ActivityReport / ActivityInput)
+    # rather than in the database, and identical for every role, so a local copy
+    # cannot go stale per caller the way a role-dependent rule would; and a
+    # model reaching for `status="inactive"`, `days=365` or a rate outside
+    # 0..100 is better told the legal set before a round trip than handed a 422.
+    # `plan` is the exception: its legal values are a SERVER CONFIG list
+    # (`activity.plans`, today "all" and "free"), so it is passed through and a
+    # wrong one comes back as the server's 422. The thresholds, the signal
+    # flags and the period lengths are the other exception: they are data in
+    # `meta.rules`, not arguments this client checks.
 
     async def activity_list(
         self,
@@ -3814,32 +3830,49 @@ class EbteqdeskClient:
         period: str = "day",
         date: str | None = None,
         plan: str = ACTIVITY_DEFAULT_PLAN,
-        tier: str | None = None,
-        min_score: float | None = None,
-        max_score: float | None = None,
+        status: str | None = None,
+        min_rate: float | None = None,
+        max_rate: float | None = None,
         query: str | None = None,
         sort: str | None = None,
         page: int | None = None,
         per_page: int | None = None,
     ) -> dict[str, Any]:
-        """GET /api/v1/activity — one row per business for a day, week or month.
+        """GET /api/v1/activity — one row per business that has a status.
 
         200 ``{"data": [{"business_id", "business_name", "customer_contact_id",
-        "points": {module: 0..1}, "days_used": {module: n}, "counts": {module:
-        n}, "score", "tier", "days_reported", "days_present",
-        "last_activity_date"}, …], "meta": {"plan", "plan_label", "period", "date", "range":
-        {"from", "to"}, "days_reported", "pagination": {"total", "per_page",
-        "current_page", "last_page"}, "filters": {…}}}``
+        "signed_up_on", "status", "rate", "rate_percent", "engaged_days",
+        "counted_days", "days_reported", "days_with_data", "last_activity_date",
+        "signals": {signal: {"days_used", "rate", "count"}}}, …], "meta":
+        {"plan", "plan_label", "period", "date", "range": {"from", "to"},
+        "today", "days_reported", "in_progress_date", "without_status",
+        "pagination": {"total", "per_page", "current_page", "last_page"},
+        "filters": {"status", "min_rate", "max_rate", "q", "sort"},
+        "deprecations", "rules"}}``
 
-        `period` is day|week|month; `date` (Y-m-d) is any day inside the period
-        and defaults server-side to the latest reported date. `tier`,
-        `min_score`/`max_score` (0..5, compared against the ROUNDED score) and
-        `query` (business id or name, at most 100 characters, sent as `q`)
-        narrow the set; `sort` is score_desc (the server default) | score_asc
-        | name. `per_page` 1..100, default 25. Pagination is in
+        `period` is day|week|month. `date` (Y-m-d) is the FIRST day of that
+        period, not any day inside it, and defaults server-side to the first
+        day of the period that ends on the latest reported date. A date after
+        today in Malaysia time is the server's 422. `status`
+        (active|exploring|dormant), `min_rate`/`max_rate` (the engaged-day rate
+        as a percentage, 0..100 inclusive; `min_rate` must not exceed
+        `max_rate`) and `query` (business id or name, at most 100 characters,
+        sent as `q`) narrow the set. `sort` is rate_desc (the server default)
+        | rate_asc | name. `per_page` 1..100, default 25. Pagination is in
         `meta.pagination`, not a `links` block.
 
-        Requires the `activity:read` scope (backed by `reports.view`).
+        There is no `tier` argument, and this client does not send `tier`. A
+        lone `tier` query is a deprecated alias of `status`: the API honours
+        it and `meta.deprecations` says so. 422 is when `status` and `tier`
+        are both sent and differ. There is no `min_score` or `max_score`
+        argument, and no `score_desc` / `score_asc` sort: the live API
+        answers those with 422.
+        Thresholds, signals, period lengths and the timezone are `meta.rules`,
+        not constants here. An empty `data` with `days_reported` 0 means
+        nothing is stored for that plan and period.
+
+        Accepts either the `activity:read` or `reports:read` scope
+        (`apiScope:activity:read|reports:read`, both backed by `reports.view`).
         """
         params: dict[str, Any] = {
             "period": _activity_choice(period, "period", ACTIVITY_PERIODS),
@@ -3849,22 +3882,22 @@ class EbteqdeskClient:
         if date is not None:
             params["date"] = _activity_date(date, "date")
 
-        if tier is not None:
-            params["tier"] = _activity_choice(tier, "tier", ACTIVITY_TIERS)
+        if status is not None:
+            params["status"] = _activity_choice(status, "status", ACTIVITY_STATUSES)
 
-        low = None if min_score is None else _activity_score(min_score, "min_score")
-        high = None if max_score is None else _activity_score(max_score, "max_score")
+        low = None if min_rate is None else _activity_rate(min_rate, "min_rate")
+        high = None if max_rate is None else _activity_rate(max_rate, "max_rate")
 
         if low is not None and high is not None and low > high:
             raise ValueError(
-                f"min_score ({low}) must not be greater than max_score ({high})."
+                f"min_rate ({low}) must not be greater than max_rate ({high})."
             )
 
         if low is not None:
-            params["min_score"] = low
+            params["min_rate"] = low
 
         if high is not None:
-            params["max_score"] = high
+            params["max_rate"] = high
 
         if query is not None:
             if not isinstance(query, str):
@@ -3900,16 +3933,22 @@ class EbteqdeskClient:
     ) -> dict[str, Any]:
         """GET /api/v1/activity/summary — the whole plan's totals for a period.
 
-        200 ``{"data": {"plan", "period", "range", "days_reported",
-        "reported_dates": [...], "customers", "average_score", "tiers":
-        {"active", "exploring", "dormant"}, "modules": {module:
-        {"businesses_used", "rate"}}, "average_points": {module}}, "meta":
-        {"plan", "plan_label", "period", "date"}}``
+        Row filters do not apply. 200 ``{"data": {"plan", "period", "range",
+        "days_reported", "reported_dates": [...], "in_progress_date",
+        "merchants", "without_status", "average_rate", "statuses": {"active",
+        "exploring", "dormant"}, "signals": {signal: {"businesses_used",
+        "rate", "total_count"}}}, "meta": {"plan", "plan_label", "period",
+        "date", "today", "rules"}}``
 
-        `modules.*.rate` is businesses_used ÷ customers (0..1).
-        `average_points` is the mean days-used ratio across businesses.
+        `merchants` counts businesses WITH a status. `average_rate` is their
+        mean engaged-day rate, 0..1 to four decimal places.
+        `signals.*.rate` is businesses_used / merchants (0..1, not 0..100).
+        `merchants` 0 with an empty `reported_dates` means nothing is stored,
+        not zero use. The old names `customers`, `tiers`, `modules`,
+        `average_score` and `average_points` are not in this payload.
 
-        Requires the `activity:read` scope (backed by `reports.view`).
+        Accepts either the `activity:read` or `reports:read` scope
+        (`apiScope:activity:read|reports:read`, both backed by `reports.view`).
         """
         params: dict[str, Any] = {
             "period": _activity_choice(period, "period", ACTIVITY_PERIODS),
@@ -3928,21 +3967,27 @@ class EbteqdeskClient:
         as_of: str | None = None,
         plan: str = ACTIVITY_DEFAULT_PLAN,
     ) -> dict[str, Any]:
-        """GET /api/v1/activity/dormant — businesses dormant N reported days running.
+        """GET /api/v1/activity/dormant — businesses with no engaged day.
 
-        A business is returned when its DAILY score was <= 1 on EACH of the last
-        `days` REPORTED dates up to `as_of` (default: the latest reported date).
-        A reported date the business is missing from counts as a 0.
+        A business is returned when it had NO engaged day across the last
+        `days` REPORTED dates up to `as_of` (default: the latest reported
+        date). Not "a daily score <= 1". A reported date the business has no
+        row for is not engaged; a business with no row in the window at all
+        is not listed.
 
         200 ``{"data": [{"business_id", "business_name", "customer_contact_id",
-        "streak_dates": [...], "streak": [{"date", "score", "present"}, …],
-        "latest": {"date", "plan", "business_name", "customer_contact_id",
-        "counts", "points", "score", "tier"}}, …], "meta": {"plan", "plan_label",
-        "days", "as_of", "total"}}``. NOT paginated.
+        "signed_up_on", "counted_days", "streak_dates": [...], "streak":
+        [{"date", "engaged", "present", "counted"}, …], "latest": {"date",
+        "plan", "business_name", "customer_contact_id", "signed_up_on",
+        "counts", "modules_used", "engaged", "status", "counted"}}, …],
+        "meta": {"plan", "plan_label", "days", "as_of", "total", "today",
+        "rules"}}``. NOT paginated.
 
-        `days` is 1..90, default 3.
+        `days` is 1..90, default 3. An empty list is ambiguous (nobody
+        dormant, or nothing stored): confirm with `activity_summary`.
 
-        Requires the `activity:read` scope (backed by `reports.view`).
+        Accepts either the `activity:read` or `reports:read` scope
+        (`apiScope:activity:read|reports:read`, both backed by `reports.view`).
         """
         params: dict[str, Any] = {
             "days": _activity_int(days, "days", 1, ACTIVITY_DORMANT_MAX_DAYS),
@@ -3964,19 +4009,21 @@ class EbteqdeskClient:
     ) -> dict[str, Any]:
         """GET /api/v1/activity/customers/{business_id} — one business, day by day.
 
-        200 ``{"data": [{"date", "present", "plan", "counts", "points": {module:
-        0|1}, "score", "tier"}, …], "meta": {"business_id", "business_name",
-        "customer_contact_id", "plan", "plan_label", "from", "to", "days_reported",
-        "days_present"}}``
+        200 ``{"data": [{"date", "present", "reported", "plan", "counts",
+        "modules_used", "engaged", "status", "counted"}, …], "meta":
+        {"business_id", "business_name", "customer_contact_id", "signed_up_on",
+        "plan", "plan_label", "from", "to", "days_reported", "days_present",
+        "counted_days", "engaged_days", "in_progress_date", "today", "rules"}}``
 
         ZERO-FILLED across REPORTED dates: a reported day the business is
-        missing from is a row with `present: false`, `plan: null` and a score of
-        0 — not an absent row. Days nobody reported are absent entirely.
+        missing from is a row with `present: false` and `plan: null` — not an
+        absent row. Days nobody reported, and that this business has no row
+        on, do not appear. A day's `status` is `active` or `dormant` only.
 
         `date_from`/`date_to` (Y-m-d, sent as `from`/`to`) default to the 30
         days ending at the latest reported date; at most 366 days, and a
-        reversed range is the server's 422. 404 when the business has NEVER had
-        a row, for any plan.
+        reversed range is the server's 422. 404 ``{"error": …}`` when the
+        business has NEVER had a row, for any plan.
 
         `business_id` must match ``[A-Za-z0-9_.-]{1,50}`` — the route's own
         constraint — and is percent-encoded into the path regardless.
@@ -3984,7 +4031,8 @@ class EbteqdeskClient:
         and any other id, such as ``WRN-10001``, exactly as written; the id is
         sent as given.
 
-        Requires the `activity:read` scope (backed by `reports.view`).
+        Accepts either the `activity:read` or `reports:read` scope
+        (`apiScope:activity:read|reports:read`, both backed by `reports.view`).
         """
         params: dict[str, Any] = {}
 
@@ -5651,18 +5699,23 @@ def _activity_int(value: Any, argument: str, low: int, high: int | None) -> int:
     return value
 
 
-def _activity_score(value: Any, argument: str) -> int | float:
-    """A score bound on 0..5. Scores are 1dp floats, so a float is legal."""
+def _activity_rate(value: Any, argument: str) -> int | float:
+    """An engaged-day rate bound, as a percentage on 0..100 inclusive.
+
+    The same scale as a row's ``rate_percent``, not the 0..1 ``rate``. A bool
+    is refused explicitly, for the reason ``_activity_int`` gives: ``True`` is
+    an ``int`` in Python and would silently become 1.
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(
-            f"{argument} must be a number from 0 to {ACTIVITY_MAX_SCORE}, "
+            f"{argument} must be a number from 0 to {ACTIVITY_MAX_RATE}, "
             f"not {value!r}."
         )
 
-    if not 0 <= value <= ACTIVITY_MAX_SCORE:
+    if not 0 <= value <= ACTIVITY_MAX_RATE:
         raise ValueError(
-            f"{argument} must be from 0 to {ACTIVITY_MAX_SCORE} — the score is "
-            f"the number of the five modules used — not {value}."
+            f"{argument} must be from 0 to {ACTIVITY_MAX_RATE} — the engaged-day "
+            f"rate as a percentage — not {value}."
         )
 
     return value

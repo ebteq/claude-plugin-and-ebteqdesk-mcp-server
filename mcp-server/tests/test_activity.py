@@ -47,28 +47,59 @@ from ebteqdesk_mcp.errors import (
     RoleScopeError,
 )
 
-MODULES = ("checkout", "appointment", "member", "catalog", "expense")
+STORED_SIGNALS = ("checkout", "appointment", "member", "catalog", "expense")
+
+#: What `meta.rules` looks like on the wire. The numbers are the desk's, echoed
+#: in a fixture so a passthrough test can see them survive. They are not
+#: imported by the client, and nothing here treats them as the client's own.
+RULES = {
+    "timezone": "Asia/Kuala_Lumpur",
+    "statuses": ["active", "exploring", "dormant"],
+    "thresholds": {"active_above_percent": 60, "dormant_below_percent": 10},
+    "signals": [
+        {"key": "login", "available": False, "drives_status": True},
+        {"key": "checkout", "available": True, "drives_status": True},
+        {"key": "appointment", "available": True, "drives_status": True},
+        {"key": "member", "available": True, "drives_status": True},
+        {"key": "catalog", "available": True, "drives_status": False},
+        {"key": "expense", "available": True, "drives_status": False},
+    ],
+    "periods": {"day": 1, "week": 7, "month": 28},
+}
+
+
+def _counts(**overrides: int) -> dict[str, int]:
+    counts = {name: 0 for name in STORED_SIGNALS}
+    counts.update(overrides)
+    return counts
 
 
 def activity_row(**overrides: Any) -> dict[str, Any]:
-    """One row of GET /api/v1/activity for a WEEK — ActivityRowResource.
+    """One row of GET /api/v1/activity — ActivityRowResource.
 
-    A week rather than a day on purpose: on a day every `points` value is 0 or
-    1 and indistinguishable from a count, so a fixture built on a day would let
-    a client that mangled the ratio pass.
+    A multi-day period on purpose: `rate` is engaged days / counted days, so a
+    fixture of 0 or 1 would let a client that mangled the ratio pass.
     """
     row = {
         "business_id": "biz-001",
         "business_name": "Salon Aurora",
         "customer_contact_id": None,
-        "points": {"checkout": 1.0, "appointment": 0.4, "member": 0.0, "catalog": 0.2, "expense": 0.0},
-        "days_used": {"checkout": 5, "appointment": 2, "member": 0, "catalog": 1, "expense": 0},
-        "counts": {"checkout": 41, "appointment": 3, "member": 0, "catalog": 1, "expense": 0},
-        "score": 1.6,
-        "tier": "dormant",
+        "signed_up_on": "2026-01-15",
+        "status": "exploring",
+        "rate": 0.4,
+        "rate_percent": 40.0,
+        "engaged_days": 2,
+        "counted_days": 5,
         "days_reported": 5,
-        "days_present": 5,
+        "days_with_data": 5,
         "last_activity_date": "2026-09-27",
+        "signals": {
+            "checkout": {"days_used": 5, "rate": 1.0, "count": 41},
+            "appointment": {"days_used": 2, "rate": 0.4, "count": 3},
+            "member": {"days_used": 0, "rate": 0.0, "count": 0},
+            "catalog": {"days_used": 1, "rate": 0.2, "count": 1},
+            "expense": {"days_used": 0, "rate": 0.0, "count": 0},
+        },
     }
     row.update(overrides)
 
@@ -81,11 +112,22 @@ LIST = {
         "plan": "all",
         "plan_label": "All businesses",
         "period": "week",
-        "date": "2026-09-23",
+        "date": "2026-09-21",
         "range": {"from": "2026-09-21", "to": "2026-09-27"},
+        "today": "2026-10-19",
         "days_reported": 5,
+        "in_progress_date": None,
+        "without_status": 0,
         "pagination": {"total": 1, "per_page": 25, "current_page": 1, "last_page": 1},
-        "filters": {"tier": None, "min_score": None, "max_score": None, "q": None, "sort": "score_desc"},
+        "filters": {
+            "status": None,
+            "min_rate": None,
+            "max_rate": None,
+            "q": None,
+            "sort": "rate_desc",
+        },
+        "deprecations": [],
+        "rules": RULES,
     },
 }
 
@@ -96,13 +138,24 @@ SUMMARY = {
         "range": {"from": "2026-09-28", "to": "2026-09-28"},
         "days_reported": 1,
         "reported_dates": ["2026-09-28"],
-        "customers": 40,
-        "average_score": 2.3,
-        "tiers": {"active": 8, "exploring": 17, "dormant": 15},
-        "modules": {m: {"businesses_used": 20, "rate": 0.5} for m in MODULES},
-        "average_points": {m: 0.5 for m in MODULES},
+        "in_progress_date": None,
+        "merchants": 40,
+        "without_status": 2,
+        "average_rate": 0.46,
+        "statuses": {"active": 8, "exploring": 17, "dormant": 15},
+        "signals": {
+            name: {"businesses_used": 20, "rate": 0.5, "total_count": 100}
+            for name in STORED_SIGNALS
+        },
     },
-    "meta": {"plan": "all", "plan_label": "All businesses", "period": "day", "date": "2026-09-28"},
+    "meta": {
+        "plan": "all",
+        "plan_label": "All businesses",
+        "period": "day",
+        "date": "2026-09-28",
+        "today": "2026-10-19",
+        "rules": RULES,
+    },
 }
 
 DORMANT = {
@@ -111,25 +164,37 @@ DORMANT = {
             "business_id": "biz-007",
             "business_name": "Kedai Rambut",
             "customer_contact_id": 12,
+            "signed_up_on": "2025-03-01",
+            "counted_days": 3,
             "streak_dates": ["2026-09-26", "2026-09-27", "2026-09-28"],
             "streak": [
-                {"date": "2026-09-26", "score": 1, "present": True},
-                {"date": "2026-09-27", "score": 0, "present": False},
-                {"date": "2026-09-28", "score": 0, "present": True},
+                {"date": "2026-09-26", "engaged": False, "present": True, "counted": True},
+                {"date": "2026-09-27", "engaged": False, "present": False, "counted": True},
+                {"date": "2026-09-28", "engaged": False, "present": True, "counted": True},
             ],
             "latest": {
                 "date": "2026-09-28",
                 "plan": "all",
                 "business_name": "Kedai Rambut",
                 "customer_contact_id": 12,
-                "counts": {m: 0 for m in MODULES},
-                "points": {m: 0 for m in MODULES},
-                "score": 0,
-                "tier": "dormant",
+                "signed_up_on": "2025-03-01",
+                "counts": _counts(),
+                "modules_used": 0,
+                "engaged": False,
+                "status": "dormant",
+                "counted": True,
             },
         }
     ],
-    "meta": {"plan": "all", "plan_label": "All businesses", "days": 3, "as_of": "2026-09-28", "total": 1},
+    "meta": {
+        "plan": "all",
+        "plan_label": "All businesses",
+        "days": 3,
+        "as_of": "2026-09-28",
+        "total": 1,
+        "today": "2026-10-19",
+        "rules": RULES,
+    },
 }
 
 HISTORY = {
@@ -137,32 +202,42 @@ HISTORY = {
         {
             "date": "2026-09-27",
             "present": False,
+            "reported": True,
             "plan": None,
-            "counts": {m: 0 for m in MODULES},
-            "points": {m: 0 for m in MODULES},
-            "score": 0,
-            "tier": "dormant",
+            "counts": _counts(),
+            "modules_used": 0,
+            "engaged": False,
+            "status": "dormant",
+            "counted": True,
         },
         {
             "date": "2026-09-28",
             "present": True,
+            "reported": True,
             "plan": "all",
-            "counts": {"checkout": 9, "appointment": 2, "member": 1, "catalog": 1, "expense": 0},
-            "points": {"checkout": 1, "appointment": 1, "member": 1, "catalog": 1, "expense": 0},
-            "score": 4,
-            "tier": "active",
+            "counts": _counts(checkout=9, appointment=2, member=1, catalog=1),
+            "modules_used": 4,
+            "engaged": True,
+            "status": "active",
+            "counted": True,
         },
     ],
     "meta": {
         "business_id": "biz-001",
         "business_name": "Salon Aurora",
         "customer_contact_id": None,
+        "signed_up_on": "2026-01-15",
         "plan": "all",
         "plan_label": "All businesses",
         "from": "2026-09-27",
         "to": "2026-09-28",
         "days_reported": 2,
         "days_present": 1,
+        "counted_days": 2,
+        "engaged_days": 1,
+        "in_progress_date": None,
+        "today": "2026-10-19",
+        "rules": RULES,
     },
 }
 
@@ -249,30 +324,34 @@ async def test_list_maps_every_argument_to_the_apis_own_name(make_client) -> Non
 
     await client.activity_list(
         period="week",
-        date="2026-09-23",
+        date="2026-09-21",
         plan="free",
-        tier="exploring",
-        min_score=2,
-        max_score=3.5,
+        status="exploring",
+        min_rate=20,
+        max_rate=75.5,
         query="Salon",
-        sort="name",
+        sort="rate_asc",
         page=2,
         per_page=50,
     )
 
     assert dict(recorder.last.url.params) == {
         "period": "week",
-        "date": "2026-09-23",
+        "date": "2026-09-21",
         "plan": "free",
-        "tier": "exploring",
-        "min_score": "2",
-        "max_score": "3.5",
+        "status": "exploring",
+        "min_rate": "20",
+        "max_rate": "75.5",
         # 🔴 `q`, not `query`: the request vocabulary is the API's.
         "q": "Salon",
-        "sort": "name",
+        "sort": "rate_asc",
         "page": "2",
         "per_page": "50",
     }
+    # The retired score query must not ride along under either name.
+    assert "tier" not in recorder.last.url.params
+    assert "min_score" not in recorder.last.url.params
+    assert "max_score" not in recorder.last.url.params
 
 
 async def test_summary_path_and_query(make_client) -> None:
@@ -386,8 +465,9 @@ async def test_an_id_outside_the_route_pattern_is_refused_before_sending(
     ],
 )
 async def test_the_payload_passes_through_verbatim(make_client, method, payload, kwargs) -> None:
-    """No renaming and no derived fields. The fractional `points` in particular
-    must arrive as the server sent them — a share of days, not a count."""
+    """No renaming and no derived fields. The fractional `rate` in particular
+    must arrive as the server sent it — engaged days / counted days, not a
+    percentage and not a rounded standing."""
     client, _ = make_client(always_json(200, payload))
 
     body = await getattr(client, method)(**kwargs)
@@ -402,8 +482,10 @@ async def test_a_zero_filled_day_survives_with_its_nulls(make_client) -> None:
 
     missing = body["data"][0]
     assert missing["present"] is False
+    assert missing["reported"] is True
     assert missing["plan"] is None
-    assert missing["score"] == 0
+    assert missing["engaged"] is False
+    assert missing["modules_used"] == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -472,14 +554,16 @@ async def test_a_role_without_reports_view_is_told_a_key_will_not_help(make_clie
     [
         ({"period": "year"}, "period"),
         ({"period": "Day"}, "period"),
-        ({"tier": "inactive"}, "tier"),
+        ({"status": "inactive"}, "status"),
         ({"sort": "score"}, "sort"),
-        ({"min_score": -0.1}, "min_score"),
-        ({"min_score": 5.5}, "min_score"),
-        ({"max_score": 6}, "max_score"),
-        ({"max_score": True}, "max_score"),
-        ({"min_score": "3"}, "min_score"),
-        ({"min_score": 4, "max_score": 2}, "min_score"),
+        ({"sort": "score_desc"}, "sort"),
+        ({"sort": "score_asc"}, "sort"),
+        ({"min_rate": -0.1}, "min_rate"),
+        ({"min_rate": 100.1}, "min_rate"),
+        ({"max_rate": 101}, "max_rate"),
+        ({"max_rate": True}, "max_rate"),
+        ({"min_rate": "3"}, "min_rate"),
+        ({"min_rate": 40, "max_rate": 10}, "min_rate"),
         ({"per_page": 0}, "per_page"),
         ({"per_page": 101}, "per_page"),
         ({"page": 0}, "page"),
@@ -499,13 +583,17 @@ async def test_list_refuses_bad_arguments_locally(make_client, kwargs, argument)
     assert recorder.requests == []
 
 
-async def test_the_score_bounds_are_inclusive(make_client) -> None:
+async def test_the_rate_bounds_are_inclusive(make_client) -> None:
+    """0 and 100 are legal percentages, and a rate equal to itself is a range."""
     client, recorder = make_client(always_json(200, LIST))
 
-    await client.activity_list(min_score=0, max_score=5)
-    await client.activity_list(min_score=3, max_score=3)
+    await client.activity_list(min_rate=0, max_rate=100)
+    await client.activity_list(min_rate=40, max_rate=40)
 
     assert len(recorder.requests) == 2
+    assert recorder.requests[0].url.params["min_rate"] == "0"
+    assert recorder.requests[0].url.params["max_rate"] == "100"
+    assert recorder.requests[1].url.params["min_rate"] == "40"
 
 
 @pytest.mark.parametrize("days", [0, 91, -3, True, 3.0, "3"])
@@ -583,15 +671,25 @@ async def test_the_tool_arguments_reach_the_wire(wired) -> None:
 
     await srv.mcp.call_tool(
         "activity_list",
-        {"period": "month", "tier": "dormant", "query": "Aurora", "per_page": 10},
+        {
+            "period": "month",
+            "status": "dormant",
+            "min_rate": 10.5,
+            "query": "Aurora",
+            "per_page": 10,
+            "sort": "name",
+        },
     )
 
     assert dict(seen[0].url.params) == {
         "period": "month",
         "plan": "all",
-        "tier": "dormant",
+        "status": "dormant",
+        # A percentage, not a 0..1 rate: 10.5 stays 10.5 on the wire.
+        "min_rate": "10.5",
         "q": "Aurora",
         "per_page": "10",
+        "sort": "name",
     }
 
 
@@ -615,8 +713,9 @@ async def test_the_customer_tool_threads_its_bounds(wired) -> None:
     "name, arguments",
     [
         ("activity_list", {"period": "year"}),
-        ("activity_list", {"tier": "inactive"}),
+        ("activity_list", {"status": "inactive"}),
         ("activity_list", {"sort": "newest"}),
+        ("activity_list", {"sort": "score_desc"}),
         ("activity_summary", {"period": "quarter"}),
     ],
 )
@@ -633,12 +732,53 @@ async def test_an_unknown_enum_value_never_leaves_the_process(wired, name, argum
 
 
 @pytest.mark.parametrize(
+    "name, arguments",
+    [
+        ("activity_list", {"min_rate": True}),
+        ("activity_list", {"max_rate": False}),
+        ("activity_list", {"page": True}),
+        ("activity_list", {"per_page": True}),
+        ("activity_list_dormant", {"days": True}),
+    ],
+)
+async def test_a_boolean_is_refused_before_a_request(wired, name, arguments) -> None:
+    """The SDK would coerce True to 1 before the body. The annotation refuses
+    it, so nothing is built."""
+    seen, handler = recording(LIST)
+    wired(handler)
+
+    with pytest.raises(ToolError, match="boolean"):
+        await srv.mcp.call_tool(name, arguments)
+
+    assert seen == []
+
+
+@pytest.mark.parametrize(
+    "name, arguments, payload, key, sent",
+    [
+        ("activity_list", {"min_rate": 0}, LIST, "min_rate", "0.0"),
+        ("activity_list", {"min_rate": 100}, LIST, "min_rate", "100.0"),
+        ("activity_list", {"min_rate": 20}, LIST, "min_rate", "20.0"),
+        ("activity_list_dormant", {"days": 3}, DORMANT, "days", "3"),
+    ],
+)
+async def test_real_numbers_still_reach_the_wire(wired, name, arguments, payload, key, sent) -> None:
+    seen, handler = recording(payload)
+    wired(handler)
+
+    result = await srv.mcp.call_tool(name, arguments)
+
+    assert not result.is_error
+    assert seen[0].url.params[key] == sent
+
+
+@pytest.mark.parametrize(
     "name, arguments, needle",
     [
         ("activity_list_dormant", {"days": 0}, "days must be 1..90"),
         ("activity_list_dormant", {"days": 365}, "days must be 1..90"),
-        ("activity_list", {"min_score": 7}, "min_score must be from 0 to 5"),
-        ("activity_list", {"min_score": 4, "max_score": 1}, "must not be greater than max_score"),
+        ("activity_list", {"min_rate": 101}, "min_rate must be from 0 to 100"),
+        ("activity_list", {"min_rate": 80, "max_rate": 10}, "must not be greater than max_rate"),
         ("activity_list", {"per_page": 500}, "per_page must be 1..100"),
         ("activity_get_customer", {"business_id": "../admin"}, "business_id must be"),
         ("activity_get_customer", {"business_id": ".."}, "path segment"),
@@ -716,7 +856,7 @@ async def test_the_schemas(tools) -> None:
         return tools[name].input_schema.get("properties", {})
 
     assert set(props("activity_list")) == {
-        "period", "date", "plan", "tier", "min_score", "max_score",
+        "period", "date", "plan", "status", "min_rate", "max_rate",
         "query", "sort", "page", "per_page",
     }
     assert set(props("activity_summary")) == {"period", "date", "plan"}
@@ -725,8 +865,40 @@ async def test_the_schemas(tools) -> None:
         "business_id", "date_from", "date_to", "plan",
     }
 
-    assert props("activity_list")["period"]["enum"] == ["day", "week", "month"]
-    assert props("activity_list")["period"]["default"] == "day"
+    def enum_of(schema: dict) -> list:
+        """A required Literal is a bare `enum`; an optional one is `anyOf`."""
+        if "enum" in schema:
+            return list(schema["enum"])
+
+        for branch in schema.get("anyOf", []):
+            if "enum" in branch:
+                return list(branch["enum"])
+
+        raise AssertionError(f"no enum in {schema!r}")
+
+    listed = props("activity_list")
+    assert listed["period"]["enum"] == ["day", "week", "month"]
+    assert listed["period"]["default"] == "day"
+    assert enum_of(listed["status"]) == ["active", "exploring", "dormant"]
+    assert enum_of(listed["sort"]) == ["rate_desc", "rate_asc", "name"]
+
+    def json_type(schema: dict) -> str:
+        if "type" in schema:
+            return schema["type"]
+        types = [branch["type"] for branch in schema.get("anyOf", []) if "type" in branch]
+        types = [kind for kind in types if kind != "null"]
+        assert types, schema
+        return types[0]
+
+    # The bool guard is a validator, not a schema change: number / integer.
+    assert json_type(listed["min_rate"]) == "number"
+    assert json_type(listed["max_rate"]) == "number"
+    assert json_type(listed["page"]) == "integer"
+    assert json_type(listed["per_page"]) == "integer"
+    assert json_type(props("activity_list_dormant")["days"]) == "integer"
+    assert "tier" not in listed
+    assert "min_score" not in listed
+    assert "max_score" not in listed
     for name in ACTIVITY_TOOLS:
         # 🔴 `all`, not `free`: the server pulls every business under `all`.
         assert props(name)["plan"]["default"] == "all", name
@@ -740,17 +912,36 @@ async def test_the_schemas(tools) -> None:
 @pytest.mark.parametrize("name", ACTIVITY_TOOLS)
 async def test_every_description_carries_the_contract(tools, name) -> None:
     """The docstring is what a model reads before deciding to call: endpoint,
-    scope AND the ability behind it, the days-used ratio, and the tiers."""
+    scope AND the ability behind it, the engaged-day rate, and `meta.rules`."""
     text = described(tools[name])
 
     assert "Read-only" in text
     assert "GET /api/v1/activity" in text
     assert "`activity:read`" in text
+    assert "`reports:read`" in text
     assert "`reports.view`" in text
-    if name in ("activity_list", "activity_summary"):
-        # The week/month ratio only appears in rows those two return.
-        assert "DAYS USED ÷ DAYS REPORTED" in text
-    assert ">= 4 `active`, >= 2 `exploring`, otherwise `dormant`" in text
+    assert "`meta.rules`" in text
+    assert "DO NOT MEMORIZE NUMBERS" in text
+    assert "engaged days / counted days" in text
+    # The retired score contract is named only to say it is gone, never as
+    # something to send or to read back.
+    assert "0..5" not in text
+    assert "DAYS USED ÷ DAYS REPORTED" not in text
+    assert ">= 4" not in text
+    if name == "activity_list":
+        assert "FIRST day" in text
+        assert "`status`" in text
+        assert "rate_desc" in text
+        assert "min_score" in text and "retired" in text
+        assert "score_desc" in text and "retired" in text
+    if name == "activity_summary":
+        assert "`merchants`" in text
+        assert "not in this payload" in text
+        assert "customers: 0" not in text
+        assert "FIRST day" in text
+    if name == "activity_list_dormant":
+        assert "NO engaged day" in text
+        assert "<= 1" not in text
 
 
 async def test_the_dormant_tool_hands_follow_ups_to_create_ticket(tools) -> None:
@@ -776,11 +967,15 @@ async def test_the_instructions_introduce_the_activity_tools() -> None:
 
     assert "twenty-five tools that read and twenty-seven that WRITE" in instructions
     assert "`activity:read`" in instructions
+    assert "`reports:read`" in instructions
     assert "WARNI POS ACTIVITY" in instructions
     assert "FREE-PLAN" not in instructions.upper()
     assert "legacy days" in instructions
     assert "plan `all`" in instructions
     assert "NO ACTIVITY IS STORED" in instructions
+    assert "`meta.rules`" in instructions
+    assert "0..5" not in instructions
+    assert "scoring <=" not in instructions
     assert "third-party POS" in instructions
     assert "untrusted_content" in instructions
     for name in ACTIVITY_TOOLS:
@@ -800,9 +995,20 @@ EMPTY_LIST = {
         "period": "day",
         "date": "2026-10-10",
         "range": {"from": "2026-10-10", "to": "2026-10-10"},
+        "today": "2026-10-19",
         "days_reported": 0,
+        "in_progress_date": None,
+        "without_status": 0,
         "pagination": {"total": 0, "per_page": 25, "current_page": 1, "last_page": 1},
-        "filters": {"tier": None, "min_score": None, "max_score": None, "q": None, "sort": "score_desc"},
+        "filters": {
+            "status": None,
+            "min_rate": None,
+            "max_rate": None,
+            "q": None,
+            "sort": "rate_desc",
+        },
+        "deprecations": [],
+        "rules": RULES,
     },
 }
 
@@ -813,13 +1019,24 @@ EMPTY_SUMMARY = {
         "range": {"from": "2026-10-10", "to": "2026-10-10"},
         "days_reported": 0,
         "reported_dates": [],
-        "customers": 0,
-        "average_score": 0,
-        "tiers": {"active": 0, "exploring": 0, "dormant": 0},
-        "modules": {m: {"businesses_used": 0, "rate": 0} for m in MODULES},
-        "average_points": {m: 0 for m in MODULES},
+        "in_progress_date": None,
+        "merchants": 0,
+        "without_status": 0,
+        "average_rate": 0.0,
+        "statuses": {"active": 0, "exploring": 0, "dormant": 0},
+        "signals": {
+            name: {"businesses_used": 0, "rate": 0.0, "total_count": 0}
+            for name in STORED_SIGNALS
+        },
     },
-    "meta": {"plan": "all", "plan_label": "All businesses", "period": "day", "date": "2026-10-10"},
+    "meta": {
+        "plan": "all",
+        "plan_label": "All businesses",
+        "period": "day",
+        "date": "2026-10-10",
+        "today": "2026-10-19",
+        "rules": RULES,
+    },
 }
 
 UUID = "9f2c1a30-5b7e-4c1d-8a62-0e3f4d5a6b7c"
@@ -904,7 +1121,7 @@ async def test_an_empty_report_arrives_as_empty_not_as_an_error(wired) -> None:
 
     wired(always_json(200, EMPTY_SUMMARY))
     summary = await srv.mcp.call_tool("activity_summary", {})
-    assert summary.structured_content["data"]["customers"] == 0
+    assert summary.structured_content["data"]["merchants"] == 0
     assert summary.structured_content["data"]["reported_dates"] == []
 
 

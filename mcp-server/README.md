@@ -169,10 +169,17 @@ Installing the wrong one gets you two HTTP stacks in one environment.
 
 `ebteqdesk-mcp` itself is versioned with semver, and the version means
 something: **the major moves when a tool's observable contract does.** This is
-`5.3.0`; `serverInfo.version` in the MCP handshake reports the same string, so a
+`6.0.0`; `serverInfo.version` in the MCP handshake reports the same string, so a
 host can tell a renamed tool argument from an outage.
 
-**5.3.0 adds four tools and moves nothing else an existing caller wrote.**
+**6.0.0 adds no tools and removes none** (still 52; 25 reads, 27 writes). The
+four activity tools changed arguments and response keys (`tier`→`status`, score
+bounds→`min_rate`/`max_rate` on 0..100, sort `rate_desc`|`rate_asc`|`name`; rows
+carry `status`/`rate`/`rate_percent`/`signals`; summary carries
+`merchants`/`average_rate`/`statuses`/`signals`; dormant is "no engaged day",
+not "score ≤ 1").
+
+**5.3.0, the previous release, adds four tools and moves nothing else an existing caller wrote.**
 `edit_ticket_comment`, `delete_ticket_comment`, `edit_private_note` and
 `delete_private_note` call the desk's new `PATCH` / `DELETE`
 `/api/v1/tickets/{id}/comments/{comment_id}` and `…/notes/{note_id}`. The list
@@ -686,9 +693,9 @@ shown once.
 | `ticket:read` | `list_tickets`, `list_tickets_by_category`, `get_ticket`, `get_ticket_comments`, `get_ticket_attachment` | read |
 | `escalation:read` | `list_escalations` — the **shared** queue — and `get_ticket` / `get_ticket_comments` / `get_ticket_attachment` / `add_private_note` / `attach_file_to_ticket` / the four edit-and-delete tools **on any escalated ticket** | read |
 | `kb:read` | `search_kb_articles`, `get_kb_article` | read |
-| `reports:read` | `get_reports_summary` — **also needs the `admin.access` ability** | read |
+| `reports:read` | `get_reports_summary` (**also needs `admin.access` + `reports.view`**), and the four `activity_*` Warni POS activity tools (which need only `reports.view`) | read |
 | `escalation-reports:read` | `get_escalation_report` | read |
-| `activity:read` | `activity_list`, `activity_summary`, `activity_list_dormant`, `activity_get_customer` — Warni POS activity. **Also needs the `reports.view` ability** | read |
+| `activity:read` | `activity_list`, `activity_summary`, `activity_list_dormant`, `activity_get_customer` — Warni POS activity (accepts **either** `activity:read` ("Warni Activity → read") **or** `reports:read` ("Reports & Analytics"), backed by the `reports.view` ability) | read |
 | `ticket:write` | `create_ticket`, `comment_on_ticket`, `add_private_note`, `edit_ticket_comment`, `delete_ticket_comment`, `edit_private_note`, `delete_private_note`, `attach_file_to_ticket`, `set_ticket_status`, `set_ticket_category`, `close_ticket` | **write** |
 | `escalation:write` | `escalate_ticket`, `de_escalate_ticket`, and `add_private_note` / `attach_file_to_ticket` / `edit_private_note` / `delete_private_note` **on an escalated ticket** — internal only | **write** |
 | `escalation:reply` | `comment_on_ticket` **on an escalated ticket**, `edit_ticket_comment` / `delete_ticket_comment` **on one** (changing what the requester reads on their ticket page costs what saying it costs — though neither sends them anything), and `close_ticket` **with a `body` on one** — **emails the requester's address** | **write** |
@@ -1214,10 +1221,10 @@ descriptions still carry every rule in prose.
 | `list_roles` | `GET /api/v1/admin/roles` | `admin:read` **+ `admin.access`** | every role, with the abilities each holds and an `assignable` flag |
 | `list_groups` | `GET /api/v1/admin/groups` | `admin:read` **+ `admin.access`** | every group, with member counts |
 | `list_api_keys` | `GET /api/v1/admin/agents/{id}/keys` | `admin:read` **+ `admin.access`** | one agent's keys — **never their secrets** |
-| `activity_list` | `GET /api/v1/activity` | `activity:read` **+ `reports.view`** | every business on the plan, one row each, for a day / week / month — paged by `meta.pagination` |
-| `activity_summary` | `GET /api/v1/activity/summary` | `activity:read` **+ `reports.view`** | plan-wide totals: tier counts, module adoption, average score |
-| `activity_list_dormant` | `GET /api/v1/activity/dormant` | `activity:read` **+ `reports.view`** | businesses scoring ≤ 1 on each of the last N reported days — not paginated |
-| `activity_get_customer` | `GET /api/v1/activity/customers/{business_id}` | `activity:read` **+ `reports.view`** | one business, day by day, zero-filled across reported dates |
+| `activity_list` | `GET /api/v1/activity` | `activity:read` **or** `reports:read` **+ `reports.view`** | one row per business with a status, paged, filter by `status` and rate |
+| `activity_summary` | `GET /api/v1/activity/summary` | `activity:read` **or** `reports:read` **+ `reports.view`** | merchants, status counts, signal adoption, average engaged-day rate |
+| `activity_list_dormant` | `GET /api/v1/activity/dormant` | `activity:read` **or** `reports:read` **+ `reports.view`** | no engaged day across the last N reported dates, not paginated |
+| `activity_get_customer` | `GET /api/v1/activity/customers/{business_id}` | `activity:read` **or** `reports:read` **+ `reports.view`** | one business, day by day, zero-filled across reported dates; a stored day is `active` or `dormant` |
 
 ⚠️ **`list_kb_categories` and `list_kb_folders` are projections, not
 endpoints.** There is no `GET /api/v1/kb/categories` and no
