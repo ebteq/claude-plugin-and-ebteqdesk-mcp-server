@@ -965,7 +965,7 @@ async def test_no_tool_reaches_the_ingest(tools) -> None:
 async def test_the_instructions_introduce_the_activity_tools() -> None:
     instructions = " ".join((srv.mcp.instructions or "").split())
 
-    assert "twenty-five tools that read and twenty-seven that WRITE" in instructions
+    assert "thirty tools that read and thirty-one that WRITE" in instructions
     assert "`activity:read`" in instructions
     assert "`reports:read`" in instructions
     assert "WARNI POS ACTIVITY" in instructions

@@ -1,10 +1,11 @@
 # Ebteqdesk agent plugin
 
-Four Claude Code skills for working an Ebteqdesk helpdesk through its MCP server:
+Five Claude Code skills for working an Ebteqdesk helpdesk through its MCP server:
 
 | Skill | Covers |
 |---|---|
-| `ebteqdesk:tickets` | List and read tickets (own queue, or the whole account with `scope="all"`), the full conversation, attachments, attach a local file on an internal note, reply, internal notes, edit or permanently delete a reply or a note, move a ticket between working states or reopen one, change or clear a ticket's type, open a ticket, close one |
+| `ebteqdesk:tickets` | List and read tickets (own queue, or the whole account with `scope="all"`), search contacts, inspect ticket options, full conversation, attachments, attach a local file on an internal note, reply, internal notes, edit or permanently delete a reply or a note, move a ticket between working states or reopen one, change or clear a ticket's type, open a ticket with full parameter parity, close one |
+| `ebteqdesk:todos` | Manage and poll To-Do Kanban cards and the automated WhatsApp review loop: list cards, inspect card details and comments, view attached screenshots, create new cards, update status along pipeline (`todo` -> `in_progress` -> `ready_to_reply` -> `done`), post internal or Grok comments, and attach local screenshots |
 | `ebteqdesk:escalations` | The shared escalation queue, reading and replying on escalated tickets, editing or deleting a reply or note on one, escalate, de-escalate, close |
 | `ebteqdesk:knowledge-base` | Search and read articles (including per-language versions), the category/folder tree across Ebteqdesk's two knowledge bases (Salon V3 and Warni), propose and update articles, check a review verdict or the proposal queue, upload and embed screenshots, create/delete categories and folders, reorder |
 | `ebteqdesk:reports` | The account-wide ticket report, the per-category escalation report, and the Warni POS engagement status (rate and status) and the dormant review |

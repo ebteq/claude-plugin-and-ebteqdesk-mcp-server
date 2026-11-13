@@ -3752,19 +3752,19 @@ async def test_the_instructions_count_and_name_the_new_tool() -> None:
     the numbers below are 5.3.0's and not 5.2.0's."""
     instructions = " ".join((srv.mcp.instructions or "").split())
 
-    assert "fifty-two tools in total" in instructions
-    assert "twenty-five tools that read and twenty-seven that WRITE" in instructions
-    assert "THIRTY-TWO tools require a write scope while only TWENTY-SEVEN change state" in instructions
-    assert "THE TWENTY-SEVEN WRITE TOOLS" in instructions
-    assert "TWO OF THE TWENTY-SEVEN DESTROY STRUCTURE" in instructions
+    assert "sixty-one tools in total" in instructions
+    assert "thirty tools that read and thirty-one that WRITE" in instructions
+    assert "THIRTY-SIX tools require a write scope while only THIRTY-ONE change state" in instructions
+    assert "THE THIRTY-ONE WRITE TOOLS" in instructions
+    assert "TWO OF THE THIRTY-ONE DESTROY STRUCTURE" in instructions
     assert "`attach_file_to_ticket`" in instructions
 
     # The retry-safe list, in both places it is stated.
-    assert "exactly FOUR exceptions" in instructions
-    assert "only FOUR writes here that are safe to retry" in instructions
+    assert "exactly FIVE exceptions" in instructions
+    assert "only FIVE writes here that are safe to retry" in instructions
 
     # Which tools read local files.
-    assert "TWO TOOLS READ THE LOCAL FILESYSTEM, `upload_kb_media` AND `attach_file_to_ticket`" in instructions
+    assert "THREE TOOLS READ THE LOCAL FILESYSTEM, `upload_kb_media`, `attach_file_to_ticket`, AND `attach_screenshot_to_todo`" in instructions
 
     # And what the tool is, where a host shows it once for the whole server.
     assert "A FILE GOES ONTO A TICKET ONE WAY ONLY" in instructions
@@ -3772,16 +3772,17 @@ async def test_the_instructions_count_and_name_the_new_tool() -> None:
     assert "a `transfer` key and no `attachment` means NOTHING IS ATTACHED YET" in instructions
 
     # No stale count survives beside the new ones.
-    # "TWENTY-SEVEN" used to be on this list as a stale scope count; since
-    # 5.3.0 it is the CURRENT write count, so 5.2.0's numbers replace it.
     for stale in (
         "forty-seven tools in total",
         "forty-eight tools in total",
+        "fifty-two tools in total",
         "twenty-two that WRITE",
         "twenty-three that WRITE",
+        "twenty-seven that WRITE",
         "TWENTY-THREE",
         "TWENTY-EIGHT",
         "TWENTY-TWO",
+        "TWENTY-SEVEN",
         "SEVENTEEN",
     ):
         assert stale not in instructions

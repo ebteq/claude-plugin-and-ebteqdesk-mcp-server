@@ -519,6 +519,15 @@ ENVELOPING_TOOLS = [
     "activity_list",
     "activity_list_dormant",
     "activity_get_customer",
+    # Contacts & To-Do Kanban tools (SCRUM-22)
+    "search_contacts",
+    "list_todos",
+    "get_todo",
+    "get_todo_attachment",
+    "create_todo",
+    "attach_screenshot_to_todo",
+    "comment_on_todo",
+    "update_todo_status",
 ]
 
 

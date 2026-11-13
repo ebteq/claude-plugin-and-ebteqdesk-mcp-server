@@ -58,6 +58,12 @@ EXPECTED_TOOLS = {
     "activity_summary",
     "activity_list_dormant",
     "activity_get_customer",
+    # Directory & To-Do reads
+    "search_contacts",
+    "get_ticket_options",
+    "list_todos",
+    "get_todo",
+    "get_todo_attachment",
     # Writes
     "create_ticket",
     "comment_on_ticket",
@@ -126,6 +132,11 @@ EXPECTED_TOOLS = {
     "update_agent",
     "issue_api_key",
     "revoke_api_key",
+    # To-Do writes
+    "create_todo",
+    "attach_screenshot_to_todo",
+    "comment_on_todo",
+    "update_todo_status",
 }
 
 # Port 1 is reserved and nothing listens on it, so a connection attempt fails
