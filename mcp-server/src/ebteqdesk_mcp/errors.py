@@ -183,6 +183,9 @@ __all__ = [
     "is_ticket_attachment_path",
     "ESCALATION_REPLY_SCOPE",
     "TICKET_WRITE_SCOPE",
+    "TODO_READ_SCOPE",
+    "TODO_WRITE_SCOPE",
+    "SCOPE_BACKING_ABILITIES",
     "ticket_write_not_found",
     "RoleAbilityError",
     "TicketAbilityError",
@@ -215,6 +218,18 @@ ESCALATION_REPLY_SCOPE = "escalation:reply"
 #: reaches escalated tickets only, which is what makes "this may be your own
 #: ticket" a live explanation for an otherwise bare 404.
 TICKET_WRITE_SCOPE = "ticket:write"
+
+#: Scope required to read To-Do Kanban cards and their attachments.
+TODO_READ_SCOPE = "todo:read"
+
+#: Scope required to create, update, comment on, and attach files to To-Do cards.
+TODO_WRITE_SCOPE = "todo:write"
+
+#: Mapping of scopes to the role abilities that back them in Ebteqdesk.
+SCOPE_BACKING_ABILITIES: dict[str, str] = {
+    "todo:read": "todo.view",
+    "todo:write": "todo.manage",
+}
 
 #: The `reason` a ticket write carries when the ticket exists, is on the shared
 #: escalation queue, and is not the caller's. Verbatim from
@@ -1875,11 +1890,18 @@ def diagnosed_scope_error(
         )
 
     if scope not in scopes:
+        ability_note = ""
+        if scope in SCOPE_BACKING_ABILITIES:
+            ability_note = (
+                f" (The `{scope}` scope requires the `{SCOPE_BACKING_ABILITIES[scope]}` "
+                f"role ability.)"
+            )
+
         return RoleScopeError(
             f"This API key carries the `{scope}` scope, but it does NOT resolve for "
             f"this account's role (403). A scope resolves only while BOTH halves "
             f"hold, so minting a new key will NOT help — it would fail "
-            f"identically. "
+            f"identically.{ability_note} "
             f"⚠️ AN ABILITY GRANT MAY NOT HELP EITHER, and asking for one blind is "
             f"the wasted trip here. Two different things produce this: the role "
             f"may not hold the ability behind `{scope}`, which an administrator "

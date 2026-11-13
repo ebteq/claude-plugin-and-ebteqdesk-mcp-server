@@ -5,7 +5,7 @@ description: Work Ebteqdesk support tickets — list or search the queue, open a
 
 # Ebteqdesk tickets
 
-Verified against `ebteqdesk-mcp` 4.4.0 (43 tools).
+Verified against `ebteqdesk-mcp` 7.0.0 (61 tools).
 
 You are working a **live helpdesk**. Real customers receive what you send.
 
@@ -530,40 +530,40 @@ close — see "Reply BEFORE you close" above.
 **To reopen, use `set_ticket_status(ticket_id, 2)`.** `close_ticket` cannot move
 a ticket back to a working state; the two tools are disjoint on purpose.
 
+## Discovering contacts & ticket options
+
+Before opening tickets or routing inquiries, discover available options and contacts:
+
+- `search_contacts(search, limit=8)`: Search existing contacts by customer name, email address, or phone number. Returns matching contacts with their `id`, `name`, `email`, and `phone`. Ideal for resolving `contact_id` before opening a ticket.
+- `get_ticket_options()`: Fetches available ticket categories/types, ticket sources, groups/teams, agents, and priorities from the desk. Always consult this when unsure of valid group IDs, source slugs, or category slugs.
+
 ## Opening a ticket
 
-`create_ticket(subject, description, requester, ...)` — `requester` identifies
-the customer, as one of two shapes:
+`create_ticket(...)` files a real ticket on the live queue.
 
-- `{"id": 12}` — an **existing** contact, exact, from `requester.id` on a
-  ticket `list_tickets` returned. Creates nothing. Prefer this whenever you
-  have an id.
-- `{"email": "ada@example.com", "name": "Ada Lovelace"}` — find-or-create,
-  matched on the **email**. If no contact has that address, **one is
-  created**. `name` is used only when the contact is newly created — it will
-  not rename an existing one, so a mistyped name next to a known address is
-  harmless but also silently ignored.
+### Customer Identification
+You can specify the customer via either:
+- `contact_id: 12` — An existing contact's numeric ID (found via `search_contacts` or previous tickets).
+- `requester`:
+  - `{"id": 12}` — Existing contact ID.
+  - `{"email": "ada@example.com", "name": "Ada Lovelace", "phone": "+60123456789"}` — Find-or-create matched on email. `name` and `phone` are used if newly created.
 
-If both `id` and `email` are given, `id` wins and `email` is ignored.
+### Routing & Assignment Parity
+- `group_id`: Assigns the ticket to a team/group (e.g. Support, Billing).
+- `agent_id`: Assigns to a specific agent.
+  - ⚠️ **Smart unassignment**: If `group_id` or `contact_id` is passed without specifying `agent_id`, the ticket defaults to unassigned (`agent_id=None`) so the target team queue can claim it. To explicitly assign to an agent when setting a group, provide `agent_id` explicitly.
+- `source`: The origin channel, such as `"whatsapp"`, `"portal"`, `"email"`, `"api"`. (Check valid sources via `get_ticket_options`).
 
-Optional: `priority` (1–4, default 2), `status`, `category`, `reference_number`,
-`tags`.
+### Properties & Metadata
+- `priority`: Numeric (1=low, 2=normal, 3=high, 4=urgent) or string (`"low"`, `"normal"`, `"high"`, `"urgent"`).
+- `status`: 1 (new), 2 (open), 3 (pending), 4 (solved), 8 (waiting on customer).
+  - ⚠️ **Opening at `status=4` emails the customer a satisfaction survey**.
+- `category`: Category slug (e.g., `"bp-task"`). Unknown slugs trigger a 422 error. Discover slugs via `get_ticket_options`.
+- `external_ref`: External system reference as a dict or string (e.g. `{"order_id": "ORD-12345"}`).
+- `reference_number`: Optional invoice, RMA, or tracking number.
+- `tags`: Sequence of string labels (e.g. `["vip", "billing"]`).
+- `resolution_note`: Internal resolution note recorded when closing or resolving tickets on creation.
+- `idempotency_key`: Optional UUID. The client automatically generates and attaches an `Idempotency-Key` header (UUIDv4) to prevent duplicate ticket creation if network retries occur.
 
-⚠️ **`category` is a slug, and an unknown one is a hard error naming the
-slug** — it does not silently file the ticket uncategorised. Read one off
-`category.slug` on a `list_tickets` row, or take any non-`_uncategorised` `key`
-from `get_escalation_report`. It is the **only** way to set the type when
-opening a ticket: there is no `type`, `ticket_type` or `ticket_type_id`
-argument, and the API refuses those with a 422. To change the type afterwards,
-use `set_ticket_category`.
-
-⚠️ **Opening a ticket already at `status=4` emails the customer the satisfaction
-survey**, on creation. Leave `status` alone unless the user asked for something
-specific.
-
-You cannot set the assignee — a created ticket is always assigned to the
-token's own account, since this API only ever shows you tickets assigned to
-you.
-
-Confirm subject, description and requester with the user before calling it.
+Confirm subject, description, customer identity, and routing with the user before calling it.
 There is no delete-ticket tool — a mistake needs a human in the web UI.

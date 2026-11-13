@@ -52,6 +52,7 @@ import os
 import re
 import stat
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import date as _date, datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -100,7 +101,19 @@ __all__ = [
     "TransferProgress",
     "MULTIPART_MAX_BYTES",
     "PUT_DEADLINE_SECONDS",
+    "TODO_READ_SCOPE",
+    "TODO_WRITE_SCOPE",
+    "TODO_STATUSES",
+    "TODO_PRIORITIES",
+    "TODO_PRESET_TAGS",
 ]
+
+#: Scopes and vocabularies for To-Do Kanban cards.
+TODO_READ_SCOPE = "todo:read"
+TODO_WRITE_SCOPE = "todo:write"
+TODO_STATUSES = ("todo", "in_progress", "ready_to_reply", "done")
+TODO_PRIORITIES = ("low", "normal", "high", "blocker")
+TODO_PRESET_TAGS = ("Customer", "Ebteqdesk", "Other Teams", "Pending Backlog")
 
 #: How much of a non-JSON body to quote back. Enough to recognise an nginx 502
 #: or a Laravel error page; short enough that a 2 MB HTML page does not end up
@@ -1359,17 +1372,49 @@ class EbteqdeskClient:
     # it is the one 403 no credential can fix and the one that must never be
     # retried. Everything else keeps the indistinguishable 404.
 
+    async def search_contacts(
+        self,
+        search: str,
+        *,
+        limit: int = 8,
+    ) -> dict[str, Any]:
+        """GET /api/v1/contacts?search={q}&limit={limit} — search contacts.
+
+        `search` is the search query (name, email, or phone number).
+        `limit` is the maximum number of results (default 8).
+
+        Requires the `ticket:read` scope.
+        """
+        params: dict[str, Any] = {"search": search, "limit": limit}
+        return await self._get("/api/v1/contacts", params=params)
+
+    async def get_ticket_options(self) -> dict[str, Any]:
+        """GET /api/v1/ticket-options — available types, sources, groups, agents, priorities.
+
+        Returns all option pick-lists needed to construct a new ticket.
+
+        Requires the `ticket:read` scope.
+        """
+        return await self._get("/api/v1/ticket-options")
+
     async def create_ticket(
         self,
         *,
         subject: str,
         description: str,
-        requester: Mapping[str, Any],
-        priority: int | None = None,
+        requester: Mapping[str, Any] | None = None,
+        contact_id: int | None = None,
+        group_id: int | None = None,
+        agent_id: int | None = None,
+        source: str | None = None,
+        priority: int | str | None = None,
         status: int | None = None,
         category: str | None = None,
+        external_ref: Mapping[str, Any] | str | None = None,
         reference_number: str | None = None,
         tags: Sequence[str] | None = None,
+        resolution_note: str | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """POST /api/v1/tickets — file a new ticket. 201 ``{"data": <ticket>}``.
 
@@ -1378,27 +1423,16 @@ class EbteqdeskClient:
         a second parser for the thing it just created.
 
         `requester` names THE REQUESTER — on this internal desk, the member of
-        staff who raised the ticket — and is required, in one of two forms:
+        staff who raised the ticket — in one of two forms:
 
             {"id": 12}                                an existing contact, by id
             {"email": "ada@example.com", "name": "…"} found, or created
 
-        The email form is find-or-create matched on the address, which is the
-        identity column. `name` is applied ONLY when the contact is inserted —
-        the server will not rename an existing contact because an API client
-        mistyped a name next to a known address. `id` wins if both are sent.
-
-        Two fields are NOT client-controllable and are absent by design: the
-        source is always "api", and the assignee is always the token's own
-        account. That second one is not a limitation to work around — this
-        surface shows you only tickets assigned to you, so a ticket created
-        with anyone else as assignee would be invisible to its creator on the
-        very next request.
-
-        Optional fields are OMITTED from the body when None rather than sent as
-        null, so the server applies its own documented defaults (priority 2 /
-        normal, status 1 / new, no category, no reference, no tags) instead of
-        this client having a second, drifting copy of them.
+        Alternatively, `contact_id` can be passed directly as an integer.
+        `group_id` assigns the ticket to a specific team. `agent_id` assigns to
+        a specific agent; when `group_id` or `contact_id` is passed without an
+        explicit `agent_id`, `agent_id: null` is sent to keep it unassigned to
+        an individual agent.
 
         `category` is a ticket-type SLUG and is the ONLY way to set the type on
         create. The server refuses the alias keys `type`, `ticket_type` and
@@ -1406,28 +1440,51 @@ class EbteqdeskClient:
         parameter for any of them and never sends one. To change the type
         afterwards, `set_ticket_category`.
 
+        An Idempotency-Key header is automatically sent (using `idempotency_key`
+        or an auto-generated UUIDv4).
+
         Requires the `ticket:write` scope and the `ticket.create` ability.
         """
         body: dict[str, Any] = {
             "subject": subject,
             "description": description,
-            # Passed through with its shape intact. Its contents are NOT
-            # validated here: an empty or contradictory requester is a 422 that
-            # names the field, which is more useful than a locally invented
-            # message, and it keeps this client agreeing with curl.
-            "requester": dict(requester) if isinstance(requester, Mapping) else requester,
         }
+        if requester is not None:
+            body["requester"] = dict(requester) if isinstance(requester, Mapping) else requester
 
-        optional = {
-            "priority": priority,
-            "status": status,
-            "category": category,
-            "reference_number": reference_number,
-            "tags": list(tags) if tags is not None else None,
-        }
-        body.update({key: value for key, value in optional.items() if value is not None})
+        if contact_id is not None:
+            body["contact_id"] = contact_id
+        if group_id is not None:
+            body["group_id"] = group_id
 
-        return await self._request("POST", "/api/v1/tickets", json=body)
+        if agent_id is not None:
+            body["agent_id"] = agent_id
+        elif contact_id is not None or group_id is not None:
+            body["agent_id"] = None
+
+        if source is not None:
+            body["source"] = source
+        if priority is not None:
+            body["priority"] = priority
+        if status is not None:
+            body["status"] = status
+        if category is not None:
+            body["category"] = category
+        if external_ref is not None:
+            body["external_ref"] = (
+                dict(external_ref) if isinstance(external_ref, Mapping) else external_ref
+            )
+        if reference_number is not None:
+            body["reference_number"] = reference_number
+        if tags is not None:
+            body["tags"] = list(tags)
+        if resolution_note is not None:
+            body["resolution_note"] = resolution_note
+
+        key = idempotency_key or str(uuid.uuid4())
+        headers = {_IDEMPOTENCY_HEADER: key}
+
+        return await self._request("POST", "/api/v1/tickets", json=body, headers=headers)
 
     async def comment_on_ticket(self, ticket_id: int, *, body: str) -> dict[str, Any]:
         """POST /api/v1/tickets/{id}/comments — reply to the requester.
@@ -4049,6 +4106,152 @@ class EbteqdeskClient:
         return await self._get(f"/api/v1/activity/customers/{segment}", params)
 
     # ------------------------------------------------------------------ #
+    # To-Do Kanban cards (SCRUM-22 / GitHub #11)
+    # ------------------------------------------------------------------ #
+
+    async def list_todos(
+        self,
+        *,
+        status: str | None = None,
+        tag: str | None = None,
+        search: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """GET /api/v1/todos — list To-Do Kanban cards.
+
+        Filtered by status ("todo", "in_progress", "ready_to_reply", "done"),
+        tag, or free-text search. Returns at most `limit` cards (default 50).
+
+        Requires the `todo:read` scope and `todo.view` ability.
+        """
+        params: dict[str, Any] = {"limit": limit}
+        if status is not None:
+            params["status"] = status
+        if tag is not None:
+            params["tag"] = tag
+        if search is not None:
+            params["search"] = search
+
+        return await self._get("/api/v1/todos", params=params)
+
+    async def get_todo(self, todo_id: int) -> dict[str, Any]:
+        """GET /api/v1/todos/{id} — full detail of one To-Do card.
+
+        Includes title, description, status, priority, labels, whatsapp_context,
+        comments, and attachments.
+
+        Requires the `todo:read` scope and `todo.view` ability.
+        """
+        return await self._get(f"/api/v1/todos/{_todo_id(todo_id)}")
+
+    async def create_todo(
+        self,
+        *,
+        title: str,
+        description: str | None = None,
+        labels: Sequence[str] | None = None,
+        whatsapp_context: Mapping[str, Any] | None = None,
+        priority: str = "normal",
+    ) -> dict[str, Any]:
+        """POST /api/v1/todos — create a new To-Do Kanban card.
+
+        `priority` defaults to "normal" ("low", "normal", "high", "blocker").
+        `whatsapp_context` can store incoming WhatsApp message details.
+
+        Requires the `todo:write` scope and `todo.manage` ability.
+        """
+        body: dict[str, Any] = {
+            "title": title,
+            "priority": priority,
+        }
+        if description is not None:
+            body["description"] = description
+        if labels is not None:
+            body["labels"] = list(labels)
+        if whatsapp_context is not None:
+            body["whatsapp_context"] = (
+                dict(whatsapp_context)
+                if isinstance(whatsapp_context, Mapping)
+                else whatsapp_context
+            )
+
+        return await self._request("POST", "/api/v1/todos", json=body)
+
+    async def update_todo_status(self, todo_id: int, status: str) -> dict[str, Any]:
+        """PATCH /api/v1/todos/{id} — move a To-Do card to a new column.
+
+        `status` must be one of "todo", "in_progress", "ready_to_reply", "done".
+
+        Requires the `todo:write` scope and `todo.manage` ability.
+        """
+        return await self._request(
+            "PATCH",
+            f"/api/v1/todos/{_todo_id(todo_id)}",
+            json={"status": status},
+        )
+
+    async def comment_on_todo(
+        self,
+        todo_id: int,
+        *,
+        body: str,
+        source: str = "grok",
+    ) -> dict[str, Any]:
+        """POST /api/v1/todos/{id}/comments — add an internal comment to a To-Do card.
+
+        `source` identifies the comment author/system (default "grok").
+
+        Requires the `todo:write` scope and `todo.manage` ability.
+        """
+        return await self._request(
+            "POST",
+            f"/api/v1/todos/{_todo_id(todo_id)}/comments",
+            json={"body": body, "source": source},
+        )
+
+    async def attach_screenshot_to_todo(
+        self,
+        todo_id: int,
+        file_path: str,
+    ) -> dict[str, Any]:
+        """POST /api/v1/todos/{id}/attachments — attach a local screenshot to a To-Do card.
+
+        🔴 READS ONLY INSIDE `EBTEQDESK_UPLOAD_ROOT`.
+        The path is resolved and validated against the configured upload directory.
+
+        Requires the `todo:write` scope and `todo.manage` ability.
+        """
+        validated_id = _todo_id(todo_id)
+        name, content = _local_upload(file_path, self._config.upload_root)
+
+        return await self._request(
+            "POST",
+            f"/api/v1/todos/{validated_id}/attachments",
+            files={"file": (name, content, "application/octet-stream")},
+        )
+
+    async def get_todo_attachment(
+        self,
+        attachment_id: int,
+        *,
+        max_dimension: int | None = 1568,
+    ) -> AttachmentImage:
+        """GET /api/v1/todos/attachments/{attachment_id} — fetch an attached image as bytes.
+
+        Downscales server-side to `max_dimension` (default 1568).
+
+        Requires the `todo:read` scope and `todo.view` ability.
+        """
+        params: dict[str, Any] = {}
+        if max_dimension is not None:
+            params["max_dimension"] = max_dimension
+
+        return await self._get_image(
+            f"/api/v1/todos/attachments/{_attachment_id(attachment_id)}",
+            params=params,
+        )
+
+    # ------------------------------------------------------------------ #
     # Transport
     # ------------------------------------------------------------------ #
 
@@ -5357,6 +5560,26 @@ def _thread_entry_id(value: Any, *, argument: str) -> int:
         raise ValueError(
             f"{argument} must be a positive integer {kind} id such as 812, not "
             f"{value!r}."
+        )
+
+    return value
+
+
+def _todo_id(value: Any) -> int:
+    """A positive integer To-Do id, or a ValueError naming the argument.
+
+    Refused here rather than sent: To-Do routes carry `whereNumber('todo')`,
+    so a non-numeric or non-positive value matches no route.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(
+            f"todo_id must be a positive integer To-Do id such as 12, not {value!r}. "
+            f"To-Do ids come from the `id` field of `list_todos`."
+        )
+
+    if value <= 0:
+        raise ValueError(
+            f"todo_id must be a positive integer To-Do id such as 12, not {value!r}."
         )
 
     return value

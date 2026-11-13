@@ -15,6 +15,7 @@ from typing import Any, Callable
 import httpx2
 import pytest
 
+from ebteqdesk_mcp import server as srv
 from ebteqdesk_mcp.client import EbteqdeskClient
 from ebteqdesk_mcp.config import Config
 
@@ -65,6 +66,21 @@ def make_client(
         return client, recorder
 
     return factory
+
+
+@pytest.fixture
+def wired(monkeypatch):
+    """Install a client whose socket is `handler` as the server's shared client."""
+
+    def install(handler):
+        config = Config(base_url=BASE_URL, token=TOKEN, timeout=5.0)
+        client = EbteqdeskClient(config, transport=httpx2.MockTransport(handler))
+        monkeypatch.setattr(srv, "_client", client)
+        return client
+
+    yield install
+
+    monkeypatch.setattr(srv, "_client", None)
 
 
 def json_response(status_code: int, payload: Any, **kwargs: Any) -> httpx2.Response:

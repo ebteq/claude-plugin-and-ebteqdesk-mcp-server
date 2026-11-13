@@ -85,6 +85,13 @@ READ_TOOL_NAMES = [
     "activity_summary",
     "activity_list_dormant",
     "activity_get_customer",
+    # Directory & ticket parity reads
+    "search_contacts",
+    "get_ticket_options",
+    # To-Do Kanban reads
+    "list_todos",
+    "get_todo",
+    "get_todo_attachment",
 ]
 
 #: The three ticket lists share one paging contract server-side (a single
@@ -180,6 +187,11 @@ WRITE_TOOL_NAMES = [
     "update_agent",
     "issue_api_key",
     "revoke_api_key",
+    # To-Do Kanban writes
+    "create_todo",
+    "attach_screenshot_to_todo",
+    "comment_on_todo",
+    "update_todo_status",
 ]
 
 TOOL_NAMES = READ_TOOL_NAMES + WRITE_TOOL_NAMES
@@ -202,19 +214,6 @@ def described(tool) -> str:
     return " ".join((tool.description or "").split())
 
 
-@pytest.fixture
-def wired(monkeypatch):
-    """Install a client whose socket is `handler` as the server's shared client."""
-
-    def install(handler):
-        config = Config(base_url="https://ebteqdesk.test", token="6|t", timeout=5.0)
-        client = EbteqdeskClient(config, transport=httpx2.MockTransport(handler))
-        monkeypatch.setattr(srv, "_client", client)
-        return client
-
-    yield install
-
-    monkeypatch.setattr(srv, "_client", None)
 
 
 #: 🔴 THE WRITES ANNOTATED `destructiveHint=True` (5.0.0). Conservative on
@@ -277,6 +276,7 @@ IDEMPOTENT_WRITE_NAMES = {
     "set_ticket_status",
     "set_ticket_category",
     "attach_file_to_ticket",
+    "update_todo_status",
 }
 
 
@@ -287,18 +287,13 @@ IDEMPOTENT_WRITE_NAMES = {
 
 async def test_exactly_the_fifty_two_tools_are_registered(tools) -> None:
     assert sorted(tools) == sorted(TOOL_NAMES)
-    assert len(TOOL_NAMES) == 52
-    # TWENTY-FIVE. Warni Activity took the READ half from 21 to 25 and left
-    # the write half alone — no tool reaches the POS ingest.
-    assert len(READ_TOOL_NAMES) == 25
-    # 🔴 TWENTY-SEVEN. Agent provisioning took the server from 33 to 42, the READ
-    # half from 16 to 21 and the WRITE half from 17 to 21 — the first four
-    # writes on this server that change WHO MAY ACT rather than what the desk
-    # says. 4.4.0's `set_ticket_category` made it 43 and 22,
-    # `attach_file_to_ticket` (5.2.0) made it 48 and 23, and the four
-    # thread-entry edits and deletes (5.3.0) make it 52 and 27. A
-    # twenty-eighth write arriving is what the test below exists to catch.
-    assert len(WRITE_TOOL_NAMES) == 27
+    assert len(TOOL_NAMES) == 61
+    # THIRTY. Warni Activity took the READ half to 25; contacts, options, and To-Do reads make it 30.
+    assert len(READ_TOOL_NAMES) == 30
+    # 🔴 THIRTY-ONE. Agent provisioning took the server to 42, 4.4.0's set_ticket_category made it 43,
+    # attach_file_to_ticket (5.2.0) made it 48, the four thread-entry edits and deletes (5.3.0)
+    # made it 52 (27 write tools), and the four To-Do Kanban writes make it 61 (31 write tools).
+    assert len(WRITE_TOOL_NAMES) == 31
 
 
 # --------------------------------------------------------------------------- #
@@ -368,16 +363,16 @@ async def test_only_the_tools_that_can_email_outside_are_open_world(tools) -> No
 
 
 async def test_the_idempotent_hints_match_the_four_retry_safe_writes(tools) -> None:
-    """The instructions name exactly four writes as safe to retry. The hint and
-    the prose must name the same four, or a host and a model disagree about
+    """The instructions name exactly five writes as safe to retry. The hint and
+    the prose must name the same five, or a host and a model disagree about
     which call may be replayed."""
     idempotent = {name for name in WRITE_TOOL_NAMES if tools[name].annotations.idempotent_hint}
 
     assert idempotent == IDEMPOTENT_WRITE_NAMES
-    assert len(IDEMPOTENT_WRITE_NAMES) == 4
+    assert len(IDEMPOTENT_WRITE_NAMES) == 5
 
     instructions = " ".join((srv.mcp.instructions or "").split())
-    assert "exactly FOUR exceptions" in instructions
+    assert "exactly FIVE exceptions" in instructions
     for name in IDEMPOTENT_WRITE_NAMES:
         assert f"`{name}`" in instructions
 
@@ -454,8 +449,9 @@ async def test_argument_schemas(tools) -> None:
     assert set(props("get_kb_article")) == {"slug", "locale", "portal"}
 
     assert set(props("create_ticket")) == {
-        "subject", "description", "requester", "priority", "status",
-        "category", "reference_number", "tags",
+        "subject", "description", "requester", "contact_id", "group_id",
+        "agent_id", "source", "priority", "status", "category", "external_ref",
+        "reference_number", "tags", "resolution_note",
     }
     assert set(props("comment_on_ticket")) == {"ticket_id", "body"}
     # The note tool takes exactly what the reply tool takes. 🔴 NO `private`
@@ -506,6 +502,19 @@ async def test_argument_schemas(tools) -> None:
     # derived from the article body on save.
     assert set(props("upload_kb_media")) == {"file_path"}
 
+    # Contacts & ticket options
+    assert set(props("search_contacts")) == {"search", "limit"}
+    assert set(props("get_ticket_options")) == set()
+
+    # To-Do Kanban tools
+    assert set(props("list_todos")) == {"status", "tag", "search", "limit"}
+    assert set(props("get_todo")) == {"todo_id"}
+    assert set(props("get_todo_attachment")) == {"attachment_id", "max_dimension"}
+    assert set(props("create_todo")) == {"title", "description", "labels", "whatsapp_context", "priority"}
+    assert set(props("attach_screenshot_to_todo")) == {"todo_id", "file_path"}
+    assert set(props("comment_on_todo")) == {"todo_id", "body", "source"}
+    assert set(props("update_todo_status")) == {"todo_id", "status"}
+
 
 async def test_no_write_tool_offers_a_dry_run(tools) -> None:
     """Ebteqdesk has no dry-run mode, so a client-side one could only describe
@@ -540,12 +549,21 @@ async def test_only_the_genuinely_required_arguments_are_required(tools) -> None
     assert required("search_kb_articles") == set()
     assert required("list_tickets") == set()
     assert required("list_escalations") == set()
+    assert required("search_contacts") == {"search"}
+    assert required("get_ticket_options") == set()
+    assert required("list_todos") == set()
+    assert required("get_todo") == {"todo_id"}
+    assert required("get_todo_attachment") == {"attachment_id"}
 
     # On the write side, "required" is the server's own required list and
     # nothing more. `status` on close is optional because the server defaults it
     # to solved; making it required here would be this client inventing a
     # stricter contract than the endpoint has.
-    assert required("create_ticket") == {"subject", "description", "requester"}
+    assert required("create_ticket") == {"subject", "description"}
+    assert required("create_todo") == {"title"}
+    assert required("attach_screenshot_to_todo") == {"todo_id", "file_path"}
+    assert required("comment_on_todo") == {"todo_id", "body"}
+    assert required("update_todo_status") == {"todo_id", "status"}
     assert required("comment_on_ticket") == {"ticket_id", "body"}
     assert required("add_private_note") == {"ticket_id", "body"}
     # Every argument of the four, required: there is no default entry and no
@@ -767,6 +785,10 @@ async def test_each_write_tool_also_names_the_ability_it_needs(tools) -> None:
     assert "`ticket.close`" in described(tools["set_ticket_status"])
     assert "`ticket.close`" in described(tools["close_ticket"])
     assert "`ticket.reply`" in described(tools["set_ticket_category"])
+    assert "`todo.manage`" in described(tools["create_todo"])
+    assert "`todo.manage`" in described(tools["attach_screenshot_to_todo"])
+    assert "`todo.manage`" in described(tools["comment_on_todo"])
+    assert "`todo.manage`" in described(tools["update_todo_status"])
 
 
 # --------------------------------------------------------------------------- #
@@ -1121,20 +1143,20 @@ async def test_the_instructions_split_the_status_vocabulary_between_the_two_tool
     assert "`ticket.close`" in instructions
 
 
-async def test_the_instructions_name_all_four_retry_safe_writes(tools) -> None:
-    """It was ONE for four releases, then TWO, and the instructions say so
+async def test_the_instructions_name_all_five_retry_safe_writes(tools) -> None:
+    """It was ONE for four releases, then TWO, then FOUR, then FIVE, and the instructions say so
     twice. A count that moves in one sentence and not the other is worse than
     no count — so both sentences are pinned, and both old counts are pinned
     ABSENT."""
     instructions = " ".join((srv.mcp.instructions or "").split())
 
-    assert "exactly FOUR exceptions" in instructions
-    assert "only FOUR writes here that are safe to retry" in instructions
+    assert "exactly FIVE exceptions" in instructions
+    assert "only FIVE writes here that are safe to retry" in instructions
+    assert "exactly FOUR exceptions" not in instructions
+    assert "only FOUR writes here that are safe to retry" not in instructions
     assert "exactly TWO exceptions" not in instructions
     assert "only TWO writes here that are safe to retry" not in instructions
     assert "ONE write here that is safe to retry" not in instructions
-    assert "exactly TWO exceptions" not in instructions
-    assert "only TWO writes here that are safe to retry" not in instructions
     assert "exactly THREE exceptions" not in instructions
     assert "only THREE writes here that are safe to retry" not in instructions
 

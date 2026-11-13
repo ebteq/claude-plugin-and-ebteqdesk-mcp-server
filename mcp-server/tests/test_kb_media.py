@@ -806,7 +806,7 @@ async def test_the_instructions_carry_the_same_two_rules() -> None:
 
     assert "NEVER INVENT A `/kb/media/` URL" in instructions
     # Two tools read it since 5.1.0, and the sentence names both.
-    assert "two tools read the local filesystem" in instructions.lower()
+    assert "three tools read the local filesystem" in instructions.lower()
     assert "`upload_kb_media`" in instructions
     assert "Never retry a timed-out `upload_kb_media`" in instructions
-    assert "TWENTY-SEVEN WRITE TOOLS" in instructions
+    assert "THIRTY-ONE WRITE TOOLS" in instructions
